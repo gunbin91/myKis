@@ -1,0 +1,112 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="card">
+  <div class="card-header">
+    <h5 class="mb-0"><i class="fas fa-chart-pie me-2"></i>포트폴리오</h5>
+  </div>
+  <div class="card-body">
+    <div class="row g-3 mb-3">
+      <div class="col-md-4">
+        <div class="card bg-dark border-secondary">
+          <div class="card-body">
+            <div class="text-muted">총자산</div>
+            <div class="fs-4 fw-bold" id="p-total">-</div>
+          </div>
+        </div>
+      </div>
+      <div class="col-md-4">
+        <div class="card bg-dark border-secondary">
+          <div class="card-body">
+            <div class="text-muted">손익</div>
+            <div class="fs-4 fw-bold" id="p-profit">-</div>
+          </div>
+        </div>
+      </div>
+      <div class="col-md-4">
+        <div class="card bg-dark border-secondary">
+          <div class="card-body">
+            <div class="text-muted">수익률</div>
+            <div class="fs-4 fw-bold" id="p-rate">-</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="d-flex justify-content-between align-items-center mb-2">
+      <div class="text-muted">보유 종목</div>
+      <button class="btn btn-sm btn-outline-light" id="p-refresh"><i class="fas fa-sync-alt"></i></button>
+    </div>
+
+    <div class="table-responsive">
+      <table class="table table-dark table-hover align-middle">
+        <thead>
+          <tr>
+            <th>종목</th>
+            <th class="text-end">보유수량</th>
+            <th class="text-end">평단</th>
+            <th class="text-end">현재가</th>
+            <th class="text-end">평가손익</th>
+            <th class="text-end">수익률</th>
+          </tr>
+        </thead>
+        <tbody id="p-body">
+          <tr><td colspan="6" class="text-center text-muted py-4">로딩 중...</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  function fmt(n){
+    if(n===undefined || n===null) return '-';
+    const x = (''+n).replace(/,/g,'');
+    const v = parseFloat(x);
+    if(isNaN(v)) return n;
+    return v.toLocaleString();
+  }
+
+  function loadPortfolio(){
+    fetch('/api/status').then(r=>r.json()).then(resp=>{
+      const b = resp.balance || {};
+      document.getElementById('p-total').textContent = fmt(b.total_asset);
+      document.getElementById('p-profit').textContent = fmt(b.total_profit);
+      document.getElementById('p-rate').textContent = (b.profit_rate ?? '-') + '%';
+
+      const tbody = document.getElementById('p-body');
+      tbody.innerHTML = '';
+      const rows = b.stocks || [];
+      if(!rows || rows.length === 0){
+        tbody.innerHTML = '<tr><td colspan="6" class="text-center text-muted py-4">보유 종목이 없습니다.</td></tr>';
+        return;
+      }
+      for(const s of rows){
+        const tr = document.createElement('tr');
+        tr.innerHTML = `
+          <td>
+            <div class="fw-bold">${s.ovrs_pdno || s.pdno || ''}</div>
+            <small class="text-muted">${s.ovrs_item_name || s.prdt_name || ''}</small>
+          </td>
+          <td class="text-end">${fmt(s.hldg_qty || s.ovrs_cblc_qty)}</td>
+          <td class="text-end">${fmt(s.pchs_avg_pric || s.pchs_avg_pric2)}</td>
+          <td class="text-end">${fmt(s.now_pric2 || s.now_pric)}</td>
+          <td class="text-end">${fmt(s.evlu_pfls_amt || s.evlu_pfls_amt2)}</td>
+          <td class="text-end">${fmt(s.evlu_pfls_rt || s.evlu_pfls_rt2)}%</td>
+        `;
+        tbody.appendChild(tr);
+      }
+    }).catch(err=>{
+      const tbody = document.getElementById('p-body');
+      tbody.innerHTML = '<tr><td colspan="6" class="text-center text-muted py-4">오류: '+err+'</td></tr>';
+    });
+  }
+
+  document.getElementById('p-refresh').addEventListener('click', loadPortfolio);
+  loadPortfolio();
+</script>
+{% endblock %}
+
+

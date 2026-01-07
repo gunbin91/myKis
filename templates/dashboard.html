@@ -1,0 +1,172 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="row">
+    <!-- 자산 현황 카드 -->
+    <div class="col-md-3 mb-4">
+        <div class="card h-100">
+            <div class="card-body">
+                <h6 class="card-title text-muted mb-2">총 평가 금액</h6>
+                <h3 class="fw-bold mb-0" id="total-asset">$0.00</h3>
+                <div class="mt-2">
+                    <span id="total-profit-rate" class="badge bg-secondary">0.00%</span>
+                    <span id="total-profit" class="text-muted ms-1">$0.00</span>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <div class="col-md-3 mb-4">
+        <div class="card h-100">
+            <div class="card-body">
+                <h6 class="card-title text-muted mb-2">실행 상태</h6>
+                <div class="d-flex align-items-center mb-2">
+                    <div id="status-indicator" class="rounded-circle bg-secondary me-2" style="width: 12px; height: 12px;"></div>
+                    <h5 class="mb-0" id="status-text">대기 중</h5>
+                </div>
+                <small class="text-muted">마켓 오픈: <span id="market-open-yn">확인 중...</span></small>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="row">
+    <!-- 보유 종목 리스트 -->
+    <div class="col-md-7 mb-4">
+        <div class="card h-100">
+            <div class="card-header d-flex justify-content-between align-items-center">
+                <h5 class="mb-0"><i class="fas fa-list me-2"></i>보유 종목</h5>
+                <button class="btn btn-sm btn-outline-light" onclick="updateStatus()"><i class="fas fa-sync-alt"></i></button>
+            </div>
+            <div class="card-body p-0">
+                <div class="table-responsive">
+                    <table class="table table-dark table-hover mb-0 align-middle">
+                        <thead>
+                            <tr>
+                                <th>종목명</th>
+                                <th class="text-end">수량</th>
+                                <th class="text-end">현재가</th>
+                                <th class="text-end">평가손익</th>
+                                <th class="text-end">수익률</th>
+                            </tr>
+                        </thead>
+                        <tbody id="stock-list-body">
+                            <tr><td colspan="5" class="text-center py-4 text-muted">데이터 로딩 중...</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 실시간 로그 -->
+    <div class="col-md-5 mb-4">
+        <div class="card h-100">
+            <div class="card-header">
+                <h5 class="mb-0"><i class="fas fa-terminal me-2"></i>시스템 로그</h5>
+            </div>
+            <div class="card-body p-0 bg-dark">
+                <div class="log-container" id="log-viewer">
+                    로그 데이터를 불러오는 중...
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+{% endblock %}
+
+{% block scripts %}
+<script>
+    let currentMode = 'mock';
+
+    function updateStatus() {
+        $.get('/api/status', function(data) {
+            const status = data.status;
+            const balance = data.balance;
+            currentMode = status.mode || 'mock';
+            
+            // 상태 업데이트
+            if (status.is_running) {
+                $('#status-indicator').removeClass('bg-secondary bg-success').addClass('bg-warning');
+                $('#status-text').text('실행 중...');
+            } else {
+                $('#status-indicator').removeClass('bg-warning bg-secondary').addClass('bg-success');
+                $('#status-text').text('대기 중');
+            }
+            
+            $('#market-open-yn').text(status.market_open ? "OPEN (거래 가능)" : "CLOSED (거래 불가)");
+            if(status.market_open) $('#market-open-yn').addClass('text-success').removeClass('text-danger');
+            else $('#market-open-yn').addClass('text-danger').removeClass('text-success');
+
+            // 자산 업데이트
+            if (balance.total_asset) {
+                $('#total-asset').text('$' + parseFloat(balance.total_asset).toLocaleString());
+                
+                const profitRate = parseFloat(balance.profit_rate);
+                const profitBadge = $('#total-profit-rate');
+                profitBadge.text(profitRate.toFixed(2) + '%');
+                
+                if (profitRate > 0) profitBadge.removeClass('bg-secondary bg-danger').addClass('bg-danger'); // 빨간색이 수익 (국내장 기준.. 해외는 초록이 수익인데 한국앱은 빨강이 수익이라 헷갈림. 일단 빨강=수익으로 통일)
+                else if (profitRate < 0) profitBadge.removeClass('bg-secondary bg-danger').addClass('bg-primary'); // 파란색이 손실
+                else profitBadge.removeClass('bg-danger bg-primary').addClass('bg-secondary');
+
+                $('#total-profit').text('$' + parseFloat(balance.total_profit).toLocaleString());
+                
+                // 종목 리스트
+                const stocks = balance.stocks;
+                const tbody = $('#stock-list-body');
+                tbody.empty();
+                
+                if (stocks && stocks.length > 0) {
+                    stocks.forEach(stock => {
+                        if (!stock.ovrs_pdno) return; // 빈 데이터 제외
+                        
+                        const rate = parseFloat(stock.evlu_pfls_rt);
+                        const rateClass = rate > 0 ? 'text-danger' : (rate < 0 ? 'text-primary' : 'text-white');
+                        
+                        const row = `
+                            <tr>
+                                <td>
+                                    <div class="fw-bold">${stock.ovrs_item_name}</div>
+                                    <small class="text-muted">${stock.ovrs_pdno}</small>
+                                </td>
+                                <td class="text-end">${stock.ovrs_cblc_qty}</td>
+                                <td class="text-end">$${parseFloat(stock.now_pric2).toLocaleString()}</td>
+                                <td class="text-end ${rateClass}">$${parseFloat(stock.frcr_evlu_pfls_amt).toLocaleString()}</td>
+                                <td class="text-end ${rateClass}">${rate}%</td>
+                            </tr>
+                        `;
+                        tbody.append(row);
+                    });
+                } else {
+                    tbody.append('<tr><td colspan="5" class="text-center py-4 text-muted">보유 종목이 없습니다.</td></tr>');
+                }
+            }
+        });
+    }
+
+    function updateLogs() {
+        $.get('/api/logs?mode=' + encodeURIComponent(currentMode), function(data) {
+            const logViewer = $('#log-viewer');
+            const isScrolledToBottom = logViewer[0].scrollHeight - logViewer[0].scrollTop <= logViewer[0].clientHeight + 50;
+            
+            logViewer.text(data.logs);
+            
+            if (isScrolledToBottom) {
+                logViewer.scrollTop(logViewer[0].scrollHeight);
+            }
+        });
+    }
+
+    // 초기 로드 및 주기적 업데이트
+    $(document).ready(function() {
+        updateStatus();
+        updateLogs();
+        
+        setInterval(updateStatus, 5000); // 5초마다 상태 갱신
+        setInterval(updateLogs, 2000);   // 2초마다 로그 갱신
+    });
+</script>
+{% endblock %}
+

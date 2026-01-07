@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="row justify-content-center">
+  <div class="col-md-10">
+    <div class="card">
+      <div class="card-header">
+        <h5 class="mb-0"><i class="fas fa-cog me-2"></i>시스템설정</h5>
+      </div>
+      <div class="card-body">
+        <div class="alert alert-info mb-0">
+          <div class="fw-bold mb-1">보안 정책</div>
+          <div class="text-muted">
+            계정/APP Key/Secret 정보는 웹 UI에서 노출하지 않습니다.<br/>
+            자동매매 전략/분석서버 설정은 <a href="/auto-trading" class="link-light">자동매매</a> 페이지에서 설정하세요.
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}

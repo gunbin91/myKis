@@ -1,0 +1,33 @@
+# ---- myKis (Python) ----
+# Virtual environments
+venv/
+.venv/
+
+# Python cache / compiled
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# Logs / runtime artifacts
+logs/
+*.log
+
+# Local runtime state (generated)
+data/
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Secrets / local credentials (DO NOT COMMIT)
+config/settings.yaml
+모의투자.txt
+실전투자.txt
+
+# Reference project (will be deleted later)
+myKiwoom-main/
+
+

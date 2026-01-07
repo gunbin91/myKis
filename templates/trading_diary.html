@@ -1,0 +1,238 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="row">
+  <div class="col-12">
+    <div class="d-flex justify-content-between align-items-center mb-3">
+      <h4 class="mb-0"><i class="fas fa-book me-2"></i>매매일지</h4>
+      <div class="d-flex gap-2">
+        <button class="btn btn-sm btn-outline-light" id="btn-diary-refresh"><i class="fas fa-sync-alt"></i></button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="row g-3 mb-3">
+  <div class="col-md-3">
+    <div class="card">
+      <div class="card-body">
+        <div class="text-muted">총 매매 건수</div>
+        <div class="fs-4 fw-bold" id="diary-total-trades">-</div>
+      </div>
+    </div>
+  </div>
+  <div class="col-md-3">
+    <div class="card">
+      <div class="card-body">
+        <div class="text-muted">총 실현손익</div>
+        <div class="fs-4 fw-bold" id="diary-total-profit">-</div>
+      </div>
+    </div>
+  </div>
+  <div class="col-md-3">
+    <div class="card">
+      <div class="card-body">
+        <div class="text-muted">총 수익률</div>
+        <div class="fs-4 fw-bold" id="diary-total-rate">-</div>
+      </div>
+    </div>
+  </div>
+  <div class="col-md-3">
+    <div class="card">
+      <div class="card-body">
+        <div class="text-muted">데이터 소스</div>
+        <div class="fw-bold" id="diary-source">-</div>
+        <div class="small text-muted" id="diary-note"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="card mb-3">
+  <div class="card-header">
+    <strong>기간 조회</strong>
+  </div>
+  <div class="card-body">
+    <div class="row g-2 align-items-end">
+      <div class="col-md-3">
+        <label class="form-label">시작일</label>
+        <input type="date" class="form-control" id="diary-from" />
+      </div>
+      <div class="col-md-3">
+        <label class="form-label">종료일</label>
+        <input type="date" class="form-control" id="diary-to" />
+      </div>
+      <div class="col-md-3">
+        <label class="form-label">거래소(실전 옵션)</label>
+        <select class="form-select" id="diary-exchange">
+          <option value="">전체</option>
+          <option value="NASD">미국(NASD)</option>
+          <option value="SEHK">홍콩(SEHK)</option>
+          <option value="SHAA">중국(SHAA)</option>
+          <option value="TKSE">일본(TKSE)</option>
+          <option value="HASE">베트남(HASE)</option>
+        </select>
+      </div>
+      <div class="col-md-3 d-flex gap-2">
+        <button class="btn btn-primary w-100" id="btn-diary-search">
+          <i class="fas fa-search me-1"></i>조회
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="card mb-3">
+  <div class="card-header d-flex justify-content-between align-items-center">
+    <strong>일별 손익 그래프</strong>
+  </div>
+  <div class="card-body">
+    <canvas id="diaryChart" height="110"></canvas>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-header">
+    <strong>일별 손익 내역</strong>
+  </div>
+  <div class="card-body p-0">
+    <div class="table-responsive">
+      <table class="table table-dark table-hover mb-0 align-middle">
+        <thead>
+          <tr>
+            <th>일자</th>
+            <th class="text-end">매도수량</th>
+            <th class="text-end">매입금액</th>
+            <th class="text-end">매도금액</th>
+            <th class="text-end">실현손익</th>
+            <th class="text-end">수익률</th>
+          </tr>
+        </thead>
+        <tbody id="diary-tbody">
+          <tr><td colspan="6" class="text-center text-muted py-4">로딩 중...</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<script>
+  let chart;
+
+  function toYMD(date){
+    const y = date.getFullYear();
+    const m = (date.getMonth()+1).toString().padStart(2,'0');
+    const d = date.getDate().toString().padStart(2,'0');
+    return `${y}-${m}-${d}`;
+  }
+
+  function fmt(n){
+    if(n === null || n === undefined) return '-';
+    const x = (''+n).replace(/,/g,'');
+    const v = parseFloat(x);
+    if(isNaN(v)) return n;
+    return v.toLocaleString();
+  }
+
+  function initDates(){
+    const end = new Date();
+    const start = new Date();
+    start.setDate(end.getDate() - 30);
+    const f = document.getElementById('diary-from');
+    const t = document.getElementById('diary-to');
+    if(!f.value) f.value = toYMD(start);
+    if(!t.value) t.value = toYMD(end);
+  }
+
+  function renderChart(labels, values){
+    const ctx = document.getElementById('diaryChart');
+    if(chart) chart.destroy();
+    chart = new Chart(ctx, {
+      type: 'bar',
+      data: {
+        labels,
+        datasets: [{
+          label: '일별 실현손익',
+          data: values,
+          borderWidth: 1
+        }]
+      },
+      options: {
+        responsive: true,
+        scales: {
+          y: { beginAtZero: false }
+        }
+      }
+    });
+  }
+
+  function loadDiary(){
+    const from = document.getElementById('diary-from').value;
+    const to = document.getElementById('diary-to').value;
+    const exchange = document.getElementById('diary-exchange').value;
+
+    const tbody = document.getElementById('diary-tbody');
+    tbody.innerHTML = '<tr><td colspan="6" class="text-center text-muted py-4">로딩 중...</td></tr>';
+
+    fetch('/api/status').then(r=>r.json()).then(st=>{
+      const mode = st.status.mode;
+      const params = new URLSearchParams();
+      params.set('mode', mode);
+      params.set('from', from);
+      params.set('to', to);
+      if(exchange) params.set('exchange', exchange);
+      return fetch('/api/trading-diary/period-profit?' + params.toString());
+    }).then(r=>r.json()).then(resp=>{
+      if(!resp.success){
+        tbody.innerHTML = '<tr><td colspan="6" class="text-center text-muted py-4">조회 실패: '+(resp.message||'')+'</td></tr>';
+        return;
+      }
+
+      document.getElementById('diary-source').textContent = resp.source || '-';
+      document.getElementById('diary-note').textContent = resp.note || '';
+
+      document.getElementById('diary-total-trades').textContent = fmt(resp.summary.total_trades);
+      document.getElementById('diary-total-profit').textContent = fmt(resp.summary.total_profit);
+      document.getElementById('diary-total-rate').textContent = (resp.summary.total_rate ?? '-') + '%';
+
+      const rows = resp.rows || [];
+      if(rows.length === 0){
+        tbody.innerHTML = '<tr><td colspan="6" class="text-center text-muted py-4">내역이 없습니다.</td></tr>';
+        renderChart([], []);
+        return;
+      }
+
+      tbody.innerHTML = '';
+      const labels = [];
+      const values = [];
+      for(const r of rows){
+        labels.push(r.date);
+        values.push(parseFloat(r.profit || 0));
+        const tr = document.createElement('tr');
+        tr.innerHTML = `
+          <td>${r.date}</td>
+          <td class="text-end">${fmt(r.sell_qty)}</td>
+          <td class="text-end">${fmt(r.buy_amt)}</td>
+          <td class="text-end">${fmt(r.sell_amt)}</td>
+          <td class="text-end">${fmt(r.profit)}</td>
+          <td class="text-end">${fmt(r.rate)}%</td>
+        `;
+        tbody.appendChild(tr);
+      }
+      renderChart(labels, values);
+    }).catch(err=>{
+      tbody.innerHTML = '<tr><td colspan="6" class="text-center text-muted py-4">오류: '+err+'</td></tr>';
+    });
+  }
+
+  document.getElementById('btn-diary-search').addEventListener('click', loadDiary);
+  document.getElementById('btn-diary-refresh').addEventListener('click', loadDiary);
+  initDates();
+  loadDiary();
+</script>
+{% endblock %}
+
+

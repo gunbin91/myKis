@@ -1,0 +1,117 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="card">
+  <div class="card-header">
+    <h5 class="mb-0"><i class="fas fa-flask me-2"></i>API 테스트</h5>
+  </div>
+  <div class="card-body">
+    <div class="row g-3">
+      <div class="col-lg-4">
+        <div class="card bg-dark border-secondary">
+          <div class="card-header border-secondary">
+            <strong>시세 조회</strong>
+          </div>
+          <div class="card-body">
+            <div class="mb-2">
+              <label class="form-label">거래소(Quote)</label>
+              <select class="form-select form-select-sm" id="q-exchange">
+                <option value="NAS">NAS</option>
+                <option value="NYS">NYS</option>
+                <option value="AMS">AMS</option>
+              </select>
+            </div>
+            <div class="mb-2">
+              <label class="form-label">종목</label>
+              <input class="form-control form-control-sm" id="q-symbol" value="TSLA" />
+            </div>
+            <div class="d-flex gap-2">
+              <button class="btn btn-sm btn-outline-info" id="btn-current">현재가</button>
+              <button class="btn btn-sm btn-outline-info" id="btn-detail">상세(실전만)</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="card bg-dark border-secondary mt-3">
+          <div class="card-header border-secondary">
+            <strong>계좌/주문 가능</strong>
+          </div>
+          <div class="card-body">
+            <div class="mb-2">
+              <label class="form-label">거래소(Order)</label>
+              <select class="form-select form-select-sm" id="a-exchange">
+                <option value="NASD">NASD</option>
+                <option value="NYSE">NYSE</option>
+                <option value="AMEX">AMEX</option>
+              </select>
+            </div>
+            <div class="mb-2">
+              <label class="form-label">종목</label>
+              <input class="form-control form-control-sm" id="a-symbol" value="TSLA" />
+            </div>
+            <div class="mb-2">
+              <label class="form-label">가격(USD)</label>
+              <input class="form-control form-control-sm" id="a-price" value="200" />
+            </div>
+            <button class="btn btn-sm btn-outline-success" id="btn-buyable">매수가능금액조회</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="col-lg-8">
+        <div class="card bg-dark border-secondary">
+          <div class="card-header border-secondary d-flex justify-content-between align-items-center">
+            <strong>응답</strong>
+            <button class="btn btn-sm btn-outline-light" id="btn-clear">Clear</button>
+          </div>
+          <div class="card-body">
+            <pre class="mb-0" style="min-height:420px; white-space:pre-wrap;" id="api-out"></pre>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  function out(obj){
+    const el = document.getElementById('api-out');
+    el.textContent = JSON.stringify(obj, null, 2);
+  }
+
+  function getMode(){
+    return fetch('/api/status').then(r=>r.json()).then(st=>st.status.mode);
+  }
+
+  document.getElementById('btn-clear').addEventListener('click', ()=>out({}));
+
+  document.getElementById('btn-current').addEventListener('click', ()=>{
+    getMode().then(mode=>{
+      const ex = document.getElementById('q-exchange').value;
+      const sym = document.getElementById('q-symbol').value.trim();
+      return fetch(`/api/quote/current?mode=${mode}&exchange=${encodeURIComponent(ex)}&symbol=${encodeURIComponent(sym)}`);
+    }).then(r=>r.json()).then(out).catch(out);
+  });
+
+  document.getElementById('btn-detail').addEventListener('click', ()=>{
+    getMode().then(mode=>{
+      const ex = document.getElementById('q-exchange').value;
+      const sym = document.getElementById('q-symbol').value.trim();
+      return fetch(`/api/quote/detail?mode=${mode}&exchange=${encodeURIComponent(ex)}&symbol=${encodeURIComponent(sym)}`);
+    }).then(r=>r.json()).then(out).catch(out);
+  });
+
+  document.getElementById('btn-buyable').addEventListener('click', ()=>{
+    getMode().then(mode=>{
+      const ex = document.getElementById('a-exchange').value;
+      const sym = document.getElementById('a-symbol').value.trim();
+      const price = document.getElementById('a-price').value.trim();
+      return fetch(`/api/account/buyable?mode=${mode}&exchange=${encodeURIComponent(ex)}&symbol=${encodeURIComponent(sym)}&price=${encodeURIComponent(price)}`);
+    }).then(r=>r.json()).then(out).catch(out);
+  });
+</script>
+{% endblock %}
+
+

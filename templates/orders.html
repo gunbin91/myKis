@@ -1,0 +1,426 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="card">
+  <div class="card-header">
+    <h5 class="mb-0"><i class="fas fa-list-alt me-2"></i>주문내역</h5>
+  </div>
+  <div class="card-body">
+    <div class="card bg-dark border-secondary mb-3">
+      <div class="card-header border-secondary">
+        <strong>조회 조건</strong>
+        <small class="text-muted ms-2">(모의는 전체조회 제약이 있어 대부분 무시됩니다)</small>
+      </div>
+      <div class="card-body">
+        <div class="row g-2 align-items-end">
+          <div class="col-md-3">
+            <label class="form-label">시작일(YYYYMMDD)</label>
+            <input class="form-control form-control-sm" id="f-start" placeholder="20260101" />
+          </div>
+          <div class="col-md-3">
+            <label class="form-label">종료일(YYYYMMDD)</label>
+            <input class="form-control form-control-sm" id="f-end" placeholder="20260107" />
+          </div>
+          <div class="col-md-2">
+            <label class="form-label">종목(티커)</label>
+            <input class="form-control form-control-sm" id="f-symbol" placeholder="AAPL" />
+          </div>
+          <div class="col-md-2">
+            <label class="form-label">매수/매도</label>
+            <select class="form-select form-select-sm" id="f-side">
+              <option value="00">전체</option>
+              <option value="02">매수</option>
+              <option value="01">매도</option>
+            </select>
+          </div>
+          <div class="col-md-2">
+            <label class="form-label">체결/미체결</label>
+            <select class="form-select form-select-sm" id="f-fill">
+              <option value="00">전체</option>
+              <option value="01">체결</option>
+              <option value="02">미체결</option>
+            </select>
+          </div>
+          <div class="col-md-3">
+            <label class="form-label">거래소(Order)</label>
+            <select class="form-select form-select-sm" id="f-exchange">
+              <option value="">전체(%)</option>
+              <option value="NASD">NASD</option>
+              <option value="NYSE">NYSE</option>
+              <option value="AMEX">AMEX</option>
+              <option value="SEHK">SEHK</option>
+              <option value="TKSE">TKSE</option>
+              <option value="SHAA">SHAA</option>
+              <option value="SZAA">SZAA</option>
+              <option value="HASE">HASE</option>
+              <option value="VNSE">VNSE</option>
+            </select>
+          </div>
+          <div class="col-md-2">
+            <label class="form-label">정렬</label>
+            <select class="form-select form-select-sm" id="f-sort">
+              <option value="DS">정순</option>
+              <option value="AS">역순</option>
+            </select>
+          </div>
+          <div class="col-md-7 d-flex gap-2">
+            <button class="btn btn-sm btn-outline-info" id="btn-search">
+              <i class="fas fa-search me-1"></i>조회
+            </button>
+            <button class="btn btn-sm btn-outline-light" id="btn-reset">
+              초기화
+            </button>
+            <button class="btn btn-sm btn-outline-secondary" id="btn-next" disabled>
+              다음 페이지
+            </button>
+            <div class="text-muted small align-self-center" id="page-hint"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="d-flex justify-content-between align-items-center mb-3">
+      <div class="text-muted">
+        최근 체결/미체결 내역 (모의는 전체조회 제약이 있어 전체만 표시)
+      </div>
+      <div class="d-flex gap-2">
+        <button class="btn btn-sm btn-outline-warning" id="load-unfilled-btn">
+          미체결 보기
+        </button>
+        <button class="btn btn-sm btn-outline-light" id="refresh-btn">
+          <i class="fas fa-sync-alt"></i>
+        </button>
+      </div>
+    </div>
+
+    <div class="table-responsive">
+      <table class="table table-dark table-hover align-middle">
+        <thead>
+          <tr>
+            <th>일자</th>
+            <th>종목</th>
+            <th>구분</th>
+            <th class="text-end">주문수량</th>
+            <th class="text-end">체결수량</th>
+            <th class="text-end">미체결</th>
+            <th class="text-end">주문가</th>
+            <th class="text-end">체결가</th>
+            <th>상태</th>
+            <th>주문번호</th>
+          </tr>
+        </thead>
+        <tbody id="orders-body">
+          <tr><td colspan="10" class="text-center text-muted py-4">로딩 중...</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  let currentMode = 'mock';
+  let lastCtxNk200 = '';
+  let lastCtxFk200 = '';
+  let lastTrCont = null;
+
+  function getMode(){
+    return fetch('/api/status').then(r=>r.json()).then(st=>{
+      currentMode = st.status.mode;
+      return currentMode;
+    });
+  }
+
+  function yyyymmdd(d){
+    const y = d.getFullYear();
+    const m = (d.getMonth()+1).toString().padStart(2,'0');
+    const day = d.getDate().toString().padStart(2,'0');
+    return `${y}${m}${day}`;
+  }
+
+  function initDefaultDates(){
+    const end = new Date();
+    const start = new Date();
+    start.setDate(end.getDate() - 7);
+    const s = document.getElementById('f-start');
+    const e = document.getElementById('f-end');
+    if(!s.value) s.value = yyyymmdd(start);
+    if(!e.value) e.value = yyyymmdd(end);
+  }
+
+  function readFilters(){
+    return {
+      start_date: document.getElementById('f-start').value.trim(),
+      end_date: document.getElementById('f-end').value.trim(),
+      symbol: document.getElementById('f-symbol').value.trim(),
+      sll_buy_dvsn: document.getElementById('f-side').value,
+      ccld_nccs_dvsn: document.getElementById('f-fill').value,
+      exchange: document.getElementById('f-exchange').value,
+      sort_sqn: document.getElementById('f-sort').value,
+    };
+  }
+
+  function setPaging(respData){
+    lastCtxNk200 = (respData && respData.ctx_area_nk200) ? respData.ctx_area_nk200.trim() : '';
+    lastCtxFk200 = (respData && respData.ctx_area_fk200) ? respData.ctx_area_fk200.trim() : '';
+    lastTrCont = (respData && respData._tr_cont) ? respData._tr_cont : null;
+
+    const hasNext = (lastTrCont === 'M' || lastTrCont === 'F') && (lastCtxNk200 || lastCtxFk200);
+    document.getElementById('btn-next').disabled = !hasNext;
+    document.getElementById('page-hint').textContent = hasNext ? '다음 데이터 존재 (연속조회)' : (lastTrCont ? '마지막 페이지' : '');
+  }
+
+  function loadOrders(append=false, useCtx=false){
+    return getMode().then(mode=>{
+      const f = readFilters();
+      const params = new URLSearchParams();
+      params.set('mode', mode);
+      if(f.start_date) params.set('start_date', f.start_date);
+      if(f.end_date) params.set('end_date', f.end_date);
+      if(f.symbol) params.set('symbol', f.symbol);
+      if(f.sll_buy_dvsn) params.set('sll_buy_dvsn', f.sll_buy_dvsn);
+      if(f.ccld_nccs_dvsn) params.set('ccld_nccs_dvsn', f.ccld_nccs_dvsn);
+      if(f.exchange) params.set('exchange', f.exchange);
+      if(f.sort_sqn) params.set('sort_sqn', f.sort_sqn);
+      if(useCtx){
+        if(lastCtxNk200) params.set('ctx_area_nk200', lastCtxNk200);
+        if(lastCtxFk200) params.set('ctx_area_fk200', lastCtxFk200);
+      }else{
+        // 첫 조회는 ctx 초기화
+        lastCtxNk200 = '';
+        lastCtxFk200 = '';
+        lastTrCont = null;
+      }
+      return fetch('/api/orders/history?' + params.toString());
+    }).then(r=>r.json()).then(resp=>{
+      const tbody = document.getElementById('orders-body');
+      if(!append) tbody.innerHTML = '<tr><td colspan="10" class="text-center text-muted py-4">로딩 중...</td></tr>';
+      if(!resp.success){
+        tbody.innerHTML = '<tr><td colspan="10" class="text-center text-muted py-4">조회 실패: '+(resp.message||'')+'</td></tr>';
+        return;
+      }
+      setPaging(resp.data);
+      const rows = (resp.data.output || []);
+      if(!rows || rows.length === 0 || (rows.ord_dt !== undefined)){
+        // 가이드 예시에서 output이 object로 올 수도 있어서 방어
+      }
+      const list = Array.isArray(rows) ? rows : (rows ? [rows] : []);
+      if(list.length === 0){
+        tbody.innerHTML = '<tr><td colspan="10" class="text-center text-muted py-4">조회 내역이 없습니다.</td></tr>';
+        return;
+      }
+      if(!append) tbody.innerHTML = '';
+      for(const o of list){
+        const tr = document.createElement('tr');
+        const canCancel = (currentMode === 'real') && (parseInt(o.nccs_qty || '0', 10) > 0);
+        const cancelBtn = canCancel ? `<button class="btn btn-sm btn-outline-danger me-1" onclick="cancelOrder('${o.ovrs_excg_cd}','${o.pdno}','${o.odno}','${o.nccs_qty}')">취소</button>` : '';
+        const reviseBtn = canCancel ? `<button class="btn btn-sm btn-outline-warning" onclick="openRevise('${o.ovrs_excg_cd}','${o.pdno}','${o.odno}','${o.nccs_qty}','${o.ft_ord_unpr3 || ''}')">정정</button>` : '';
+        tr.innerHTML = `
+          <td>${o.ord_dt || ''}</td>
+          <td>
+            <div class="fw-bold">${o.prdt_name || ''}</div>
+            <small class="text-muted">${o.pdno || ''}</small>
+          </td>
+          <td>${o.sll_buy_dvsn_cd_name || o.sll_buy_dvsn_cd || ''}</td>
+          <td class="text-end">${o.ft_ord_qty || ''}</td>
+          <td class="text-end">${o.ft_ccld_qty || ''}</td>
+          <td class="text-end">${o.nccs_qty || ''}</td>
+          <td class="text-end">${o.ft_ord_unpr3 || ''}</td>
+          <td class="text-end">${o.ft_ccld_unpr3 || ''}</td>
+          <td>${o.prcs_stat_name || ''}</td>
+          <td>
+            <div>${o.odno || ''}</div>
+            <div class="mt-1">${cancelBtn}${reviseBtn}</div>
+          </td>
+        `;
+        tbody.appendChild(tr);
+      }
+
+      if(list.length > 0){
+        const hint = document.getElementById('page-hint');
+        const base = hint.textContent || '';
+        hint.textContent = (base ? (base + ' · ') : '') + `이번 페이지 ${list.length}건`;
+      }
+    }).catch(err=>{
+      const tbody = document.getElementById('orders-body');
+      tbody.innerHTML = '<tr><td colspan="10" class="text-center text-muted py-4">오류: '+err+'</td></tr>';
+    });
+  }
+
+  function loadUnfilled(){
+    return getMode().then(mode=>{
+      return fetch('/api/orders/unfilled?mode='+mode);
+    }).then(r=>r.json()).then(resp=>{
+      const tbody = document.getElementById('orders-body');
+      tbody.innerHTML = '';
+      if(!resp.success){
+        tbody.innerHTML = '<tr><td colspan="10" class="text-center text-muted py-4">조회 실패: '+(resp.message||'')+'</td></tr>';
+        return;
+      }
+      const list = resp.data || [];
+      if(list.length === 0){
+        tbody.innerHTML = `<tr><td colspan="10" class="text-center text-muted py-4">미체결 내역 없음 (${resp.source})</td></tr>`;
+        return;
+      }
+      for(const o of list){
+        const tr = document.createElement('tr');
+        const canCancel = (currentMode === 'real') && (parseInt(o.nccs_qty || '0', 10) > 0);
+        const cancelBtn = canCancel ? `<button class="btn btn-sm btn-outline-danger" onclick="cancelOrder('${o.ovrs_excg_cd}','${o.pdno}','${o.odno}','${o.nccs_qty}')">취소</button>` : '';
+        tr.innerHTML = `
+          <td>${o.ord_dt || ''}</td>
+          <td>
+            <div class="fw-bold">${o.prdt_name || ''}</div>
+            <small class="text-muted">${o.pdno || ''}</small>
+          </td>
+          <td>${o.sll_buy_dvsn_cd_name || o.sll_buy_dvsn_cd || ''}</td>
+          <td class="text-end">${o.ft_ord_qty || ''}</td>
+          <td class="text-end">${o.ft_ccld_qty || ''}</td>
+          <td class="text-end">${o.nccs_qty || ''}</td>
+          <td class="text-end">${o.ft_ord_unpr3 || ''}</td>
+          <td class="text-end">${o.ft_ccld_unpr3 || ''}</td>
+          <td>${o.prcs_stat_name || ''}</td>
+          <td>
+            <div>${o.odno || ''}</div>
+            <div class="mt-1">${cancelBtn}</div>
+          </td>
+        `;
+        tbody.appendChild(tr);
+      }
+    });
+  }
+
+  function cancelOrder(exchange, symbol, odno, qty){
+    if(!confirm(`주문 취소하시겠습니까?\n${symbol} / ODNO=${odno} / 수량=${qty}`)) return;
+    fetch('/api/orders/cancel', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({
+        mode: currentMode,
+        exchange: exchange,
+        symbol: symbol,
+        origin_order_no: odno,
+        qty: parseInt(qty,10)
+      })
+    }).then(r=>r.json()).then(resp=>{
+      if(resp.success){
+        alert('취소 요청 성공');
+      }else{
+        alert('취소 실패: ' + (resp.message || ''));
+      }
+      loadUnfilled();
+    }).catch(err=>alert('취소 오류: '+err));
+  }
+
+  function openRevise(exchange, symbol, odno, qty, price){
+    document.getElementById('rv-exchange').value = exchange || '';
+    document.getElementById('rv-symbol').value = symbol || '';
+    document.getElementById('rv-odno').value = odno || '';
+    document.getElementById('rv-qty').value = parseInt(qty||'0',10) || 0;
+    document.getElementById('rv-price').value = (price || '').toString().trim();
+    const modal = new bootstrap.Modal(document.getElementById('reviseModal'));
+    modal.show();
+  }
+
+  function submitRevise(){
+    const exchange = document.getElementById('rv-exchange').value.trim();
+    const symbol = document.getElementById('rv-symbol').value.trim();
+    const odno = document.getElementById('rv-odno').value.trim();
+    const qty = parseInt(document.getElementById('rv-qty').value, 10);
+    const price = parseFloat(document.getElementById('rv-price').value);
+    if(!exchange || !symbol || !odno || !qty || !price){
+      alert('필수값을 입력하세요.');
+      return;
+    }
+    fetch('/api/orders/revise', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({
+        mode: currentMode,
+        exchange: exchange,
+        symbol: symbol,
+        origin_order_no: odno,
+        qty: qty,
+        price: price
+      })
+    }).then(r=>r.json()).then(resp=>{
+      if(resp.success){
+        alert('정정 요청 성공');
+      }else{
+        alert('정정 실패: ' + (resp.message || ''));
+      }
+      loadUnfilled();
+    }).catch(err=>alert('정정 오류: '+err));
+  }
+
+  function resetFilters(){
+    document.getElementById('f-symbol').value = '';
+    document.getElementById('f-side').value = '00';
+    document.getElementById('f-fill').value = '00';
+    document.getElementById('f-exchange').value = '';
+    document.getElementById('f-sort').value = 'DS';
+    initDefaultDates();
+    lastCtxNk200 = '';
+    lastCtxFk200 = '';
+    lastTrCont = null;
+    document.getElementById('btn-next').disabled = true;
+    document.getElementById('page-hint').textContent = '';
+  }
+
+  document.getElementById('refresh-btn').addEventListener('click', ()=>loadOrders(false,false));
+  document.getElementById('load-unfilled-btn').addEventListener('click', loadUnfilled);
+  document.getElementById('btn-search').addEventListener('click', ()=>loadOrders(false,false));
+  document.getElementById('btn-next').addEventListener('click', ()=>loadOrders(true,true));
+  document.getElementById('btn-reset').addEventListener('click', ()=>{ resetFilters(); loadOrders(false,false); });
+  initDefaultDates();
+  loadOrders(false,false);
+</script>
+
+<!-- 정정 모달 -->
+<div class="modal fade" id="reviseModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog">
+    <div class="modal-content bg-dark border-secondary">
+      <div class="modal-header border-secondary">
+        <h5 class="modal-title">주문 정정</h5>
+        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <div class="modal-body">
+        <div class="row g-2">
+          <div class="col-4">
+            <label class="form-label">거래소</label>
+            <input class="form-control form-control-sm" id="rv-exchange" />
+          </div>
+          <div class="col-8">
+            <label class="form-label">종목</label>
+            <input class="form-control form-control-sm" id="rv-symbol" />
+          </div>
+          <div class="col-12">
+            <label class="form-label">원주문번호(ODNO)</label>
+            <input class="form-control form-control-sm" id="rv-odno" />
+          </div>
+          <div class="col-6">
+            <label class="form-label">정정수량</label>
+            <input type="number" class="form-control form-control-sm" id="rv-qty" />
+          </div>
+          <div class="col-6">
+            <label class="form-label">정정가격</label>
+            <input type="number" step="0.0001" class="form-control form-control-sm" id="rv-price" />
+          </div>
+          <div class="col-12">
+            <div class="small text-muted">
+              - 정정은 실전/모의 모두 가능하나, 거래소/주문유형에 따라 제약이 있을 수 있습니다.<br/>
+              - 미체결 수량 범위 내에서 정정하세요.
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="modal-footer border-secondary">
+        <button type="button" class="btn btn-outline-light" data-bs-dismiss="modal">닫기</button>
+        <button type="button" class="btn btn-warning" onclick="submitRevise()">정정 요청</button>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+
