@@ -24,7 +24,7 @@
   <div class="col-md-3">
     <div class="card">
       <div class="card-body">
-        <div class="text-muted">총 실현손익</div>
+        <div class="text-muted">총 실현손익 <span class="badge bg-secondary ms-1" id="diary-total-profit-badge">USD</span></div>
         <div class="fs-4 fw-bold" id="diary-total-profit">-</div>
       </div>
     </div>
@@ -102,9 +102,9 @@
           <tr>
             <th>일자</th>
             <th class="text-end">매도수량</th>
-            <th class="text-end">매입금액</th>
-            <th class="text-end">매도금액</th>
-            <th class="text-end">실현손익</th>
+            <th class="text-end">매입금액 <span class="badge bg-secondary" id="diary-th-buy-badge">USD</span></th>
+            <th class="text-end">매도금액 <span class="badge bg-secondary" id="diary-th-sell-badge">USD</span></th>
+            <th class="text-end">실현손익 <span class="badge bg-secondary" id="diary-th-profit-badge">USD</span></th>
             <th class="text-end">수익률</th>
           </tr>
         </thead>
@@ -121,6 +121,28 @@
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 <script>
   let chart;
+
+  function updateCurrencyLabels(){
+    try{
+      const m = (window.CurrencyPref && window.CurrencyPref.getMode) ? window.CurrencyPref.getMode() : 'USD';
+      const isKrw = (m === 'KRW');
+      const unit = isKrw ? 'KRW' : 'USD';
+      const badges = [
+        document.getElementById('diary-total-profit-badge'),
+        document.getElementById('diary-th-buy-badge'),
+        document.getElementById('diary-th-sell-badge'),
+        document.getElementById('diary-th-profit-badge'),
+      ];
+      for(const el of badges){
+        if(!el) continue;
+        el.textContent = unit;
+        el.classList.toggle('bg-secondary', !isKrw);
+        el.classList.toggle('bg-info', isKrw);
+        el.classList.toggle('text-dark', isKrw);
+        el.title = isKrw ? 'USD 값을 환율로 원화 환산해 표시합니다.' : 'USD 기준 표시입니다.';
+      }
+    }catch(e){}
+  }
 
   function toYMD(date){
     const y = date.getFullYear();
@@ -150,12 +172,16 @@
   function renderChart(labels, values){
     const ctx = document.getElementById('diaryChart');
     if(chart) chart.destroy();
+
+    const pref = (window.CurrencyPref && window.CurrencyPref.getMode) ? window.CurrencyPref.getMode() : 'USD';
+    const isKrw = (pref === 'KRW');
+    const sym = isKrw ? '₩' : '$';
     chart = new Chart(ctx, {
       type: 'bar',
       data: {
         labels,
         datasets: [{
-          label: '일별 실현손익',
+          label: `일별 실현손익 (${sym})`,
           data: values,
           borderWidth: 1
         }]
@@ -179,6 +205,13 @@
 
     fetch('/api/status').then(r=>r.json()).then(st=>{
       const mode = st.status.mode;
+      try{
+        if(window.CurrencyPref){
+          window.CurrencyPref.storeFxFromBalance(st.balance || {});
+          window.CurrencyPref.syncCurrencyUi();
+        }
+      }catch(e){}
+      updateCurrencyLabels();
       const params = new URLSearchParams();
       params.set('mode', mode);
       params.set('from', from);
@@ -195,7 +228,15 @@
       document.getElementById('diary-note').textContent = resp.note || '';
 
       document.getElementById('diary-total-trades').textContent = fmt(resp.summary.total_trades);
-      document.getElementById('diary-total-profit').textContent = fmt(resp.summary.total_profit);
+      const money = (v, digits=2)=>{
+        try{
+          if(window.CurrencyPref) return window.CurrencyPref.formatMoney(v, 'USD', {digits});
+        }catch(e){}
+        const x = parseFloat((''+(v ?? '')).replace(/,/g,''));
+        if(isNaN(x)) return '-';
+        return '$' + x.toLocaleString(undefined,{maximumFractionDigits: digits});
+      };
+      document.getElementById('diary-total-profit').textContent = money(resp.summary.total_profit, 2);
       document.getElementById('diary-total-rate').textContent = (resp.summary.total_rate ?? '-') + '%';
 
       const rows = resp.rows || [];
@@ -208,16 +249,22 @@
       tbody.innerHTML = '';
       const labels = [];
       const values = [];
+      const pref = (window.CurrencyPref && window.CurrencyPref.getMode) ? window.CurrencyPref.getMode() : 'USD';
+      const fx = (window.CurrencyPref && window.CurrencyPref.getFx) ? window.CurrencyPref.getFx() : {rate: 0};
+      const isKrw = (pref === 'KRW');
+      const fxRate = (fx && fx.rate) ? fx.rate : 0;
       for(const r of rows){
         labels.push(r.date);
-        values.push(parseFloat(r.profit || 0));
+        const pUsd = parseFloat((''+(r.profit ?? 0)).replace(/,/g,'')) || 0;
+        const pDisp = (isKrw && fxRate > 0) ? (pUsd * fxRate) : pUsd;
+        values.push(pDisp);
         const tr = document.createElement('tr');
         tr.innerHTML = `
           <td>${r.date}</td>
           <td class="text-end">${fmt(r.sell_qty)}</td>
-          <td class="text-end">${fmt(r.buy_amt)}</td>
-          <td class="text-end">${fmt(r.sell_amt)}</td>
-          <td class="text-end">${fmt(r.profit)}</td>
+          <td class="text-end">${money(r.buy_amt, 2)}</td>
+          <td class="text-end">${money(r.sell_amt, 2)}</td>
+          <td class="text-end">${money(r.profit, 2)}</td>
           <td class="text-end">${fmt(r.rate)}%</td>
         `;
         tbody.appendChild(tr);
@@ -231,7 +278,11 @@
   document.getElementById('btn-diary-search').addEventListener('click', loadDiary);
   document.getElementById('btn-diary-refresh').addEventListener('click', loadDiary);
   initDates();
+  updateCurrencyLabels();
   loadDiary();
+  window.addEventListener('currency:changed', ()=>{
+    try{ loadDiary(); }catch(e){}
+  });
 </script>
 {% endblock %}
 

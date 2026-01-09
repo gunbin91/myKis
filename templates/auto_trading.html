@@ -96,16 +96,26 @@
                     <label class="form-label">Port</label>
                     <input type="number" class="form-control form-control-sm" id="analysis-port" placeholder="5000" />
                   </div>
+                  <div class="col-md-4">
+                    <label class="form-label">환율(원/달러)</label>
+                    <div class="small text-muted" id="usd-krw-auto-text">자동 환율을 불러오는 중...</div>
+                    <div class="form-text text-muted">
+                      환율은 사용자 입력을 받지 않습니다. KIS API → FinanceDataReader 순으로 자동 조회하며,
+                      둘 다 실패하면 <strong>매수는 취소(스킵)</strong>되고 매도 조건만 실행됩니다.
+                    </div>
+                  </div>
                   <div class="col-12">
-                    <div class="small text-muted">분석 요청 경로는 내부 고정: <code>/analysis</code></div>
+                    <div class="small text-muted">분석 요청은 내부에서 실시간 분석 실행 후 결과를 폴링합니다. (<code>/api/start_analysis</code> → <code>/v1/analysis/result</code>)</div>
                   </div>
                   <div class="col-md-6">
-                    <label class="form-label">1회 최대 매수 금액($)</label>
-                    <input type="number" class="form-control form-control-sm" id="max-buy-amount" />
-                  </div>
-                  <div class="col-md-6">
-                    <label class="form-label">매매 제외 예수금($)</label>
+                    <label class="form-label">매수 제외 예수금(원화)</label>
                     <input type="number" class="form-control form-control-sm" id="reserve-cash" />
+                    <div class="form-text text-muted">총자산이 커도, 해외주식 매수는 주문가능금액(USD) 기준입니다. 여기 입력한 원화는 환율로 USD로 환산되어 예산에서 제외됩니다.</div>
+                  </div>
+                  <div class="col-md-4">
+                    <label class="form-label">매수 종목 수(top_n)</label>
+                    <input type="number" class="form-control form-control-sm" id="top-n" />
+                    <div class="form-text text-muted">분석 서버 BUY 리스트 상위 N개만 매수합니다.</div>
                   </div>
                   <div class="col-md-4">
                     <label class="form-label">익절(%)</label>
@@ -122,6 +132,32 @@
                   <div class="col-md-4">
                     <label class="form-label">슬리피지(%)</label>
                     <input type="number" step="0.1" class="form-control form-control-sm" id="slippage-pct" />
+                  </div>
+                  <div class="col-12"><hr class="border-secondary my-2"/></div>
+                  <div class="col-md-6">
+                    <label class="form-label">매수 주문 방식</label>
+                    <select class="form-select form-select-sm" id="buy-order-method">
+                      <option value="limit_ask_ladder">매도호가 기반 지정가(1호가→상향 재시도, 실전 추천)</option>
+                      <option value="limit_slippage">현재가 + 슬리피지 지정가(기본/모의 권장)</option>
+                    </select>
+                    <div class="form-text text-muted">
+                      해외주식 호가 API(해외주식-033)는 <strong>모의투자 미지원</strong>이라, 모의에서는 지정가(슬리피지) 방식으로 동작합니다.
+                    </div>
+                  </div>
+                  <div class="col-md-6">
+                    <label class="form-label">가드: 허용 프리미엄(%)</label>
+                    <input type="number" step="0.1" class="form-control form-control-sm" id="limit-buy-max-premium-pct" />
+                    <div class="form-text text-muted">현재가 대비 매도호가가 이 %를 초과하면 매수를 스킵합니다.</div>
+                  </div>
+                  <div class="col-md-4">
+                    <label class="form-label">최대 호가 단계</label>
+                    <input type="number" class="form-control form-control-sm" id="limit-buy-max-levels" />
+                    <div class="form-text text-muted">미국은 최대 10호가. (예: 5 → 1~5호가까지만 시도)</div>
+                  </div>
+                  <div class="col-md-4">
+                    <label class="form-label">단계 대기(초)</label>
+                    <input type="number" step="0.1" class="form-control form-control-sm" id="limit-buy-step-wait-sec" />
+                    <div class="form-text text-muted">주문 후 미체결 확인까지 기다릴 시간입니다.</div>
                   </div>
                 </div>
                 <div class="d-flex gap-2">
@@ -150,6 +186,14 @@
                     <label class="form-label">기준(%)</label>
                     <input type="number" step="0.1" class="form-control form-control-sm" id="intraday-threshold-pct" />
                     <div class="form-text text-muted">예: <strong>-7</strong> 입력 → -7% 손절 감시 / <strong>+7</strong> 입력 → +7% 익절 감시</div>
+                  </div>
+                  <div class="col-12">
+                    <div class="d-flex align-items-center gap-2 mt-2">
+                      <button type="button" class="btn btn-sm btn-primary" id="intraday-save-btn">
+                        <i class="fas fa-save me-1"></i>저장(공통)
+                      </button>
+                      <div class="small text-muted">장중 손절 감시 설정도 위의 <strong>저장</strong> 버튼과 함께 저장됩니다.</div>
+                    </div>
                   </div>
                 </div>
               </div>
@@ -182,12 +226,32 @@
         document.getElementById('analysis-host').value = s.common.analysis_host || 'localhost';
         document.getElementById('analysis-port').value = s.common.analysis_port || 5000;
 
-        document.getElementById('max-buy-amount').value = s.strategy.max_buy_amount ?? '';
-        document.getElementById('reserve-cash').value = s.strategy.reserve_cash ?? '';
+        // 자동 환율 표시: /api/status.balance.usd_krw_rate
+        try{
+          const bal = (d && d.balance) ? d.balance : {};
+          const r = bal.usd_krw_rate;
+          const src = bal.usd_krw_rate_source;
+          if(r && parseFloat(r) > 0){
+            document.getElementById('usd-krw-auto-text').textContent = `자동 환율: ${parseFloat(r).toLocaleString()}원 (source=${src || '-'})`;
+          }else{
+            document.getElementById('usd-krw-auto-text').textContent = `자동 환율: - (source=${src || 'unavailable'})`;
+          }
+        }catch(e){
+          document.getElementById('usd-krw-auto-text').textContent = '자동 환율: -';
+        }
+        document.getElementById('reserve-cash').value = s.strategy.reserve_cash_krw ?? '';
+        document.getElementById('top-n').value = (s.strategy.top_n ?? 5) ?? 5;
         document.getElementById('take-profit').value = s.strategy.take_profit_pct ?? '';
         document.getElementById('stop-loss').value = s.strategy.stop_loss_pct ?? '';
-        document.getElementById('max-hold-days').value = s.strategy.max_hold_days ?? '';
+        document.getElementById('max-hold-days').value = (s.strategy.max_hold_days ?? s.strategy.max_hold_period ?? '') ?? '';
         document.getElementById('slippage-pct').value = s.strategy.slippage_pct ?? 0.5;
+
+        // 매수 방식/가드
+        const defaultBuyMethod = (mode === 'real') ? 'limit_ask_ladder' : 'limit_slippage';
+        document.getElementById('buy-order-method').value = (s.strategy.buy_order_method || defaultBuyMethod);
+        document.getElementById('limit-buy-max-premium-pct').value = (s.strategy.limit_buy_max_premium_pct ?? 1.0);
+        document.getElementById('limit-buy-max-levels').value = (s.strategy.limit_buy_max_levels ?? 5);
+        document.getElementById('limit-buy-step-wait-sec').value = (s.strategy.limit_buy_step_wait_sec ?? 1.0);
 
         const intraday = s.intraday_stop_loss || {};
         document.getElementById('intraday-enabled').checked = !!intraday.enabled;
@@ -259,12 +323,16 @@
           threshold_pct: parseFloat(document.getElementById('intraday-threshold-pct').value),
         },
         strategy: {
-          max_buy_amount: parseFloat(document.getElementById('max-buy-amount').value),
-          reserve_cash: parseFloat(document.getElementById('reserve-cash').value),
+          reserve_cash_krw: parseFloat(document.getElementById('reserve-cash').value),
+          top_n: parseInt(document.getElementById('top-n').value, 10),
           take_profit_pct: parseFloat(document.getElementById('take-profit').value),
           stop_loss_pct: parseFloat(document.getElementById('stop-loss').value),
           max_hold_days: parseInt(document.getElementById('max-hold-days').value, 10),
           slippage_pct: parseFloat(document.getElementById('slippage-pct').value),
+          buy_order_method: document.getElementById('buy-order-method').value,
+          limit_buy_max_premium_pct: parseFloat(document.getElementById('limit-buy-max-premium-pct').value),
+          limit_buy_max_levels: parseInt(document.getElementById('limit-buy-max-levels').value, 10),
+          limit_buy_step_wait_sec: parseFloat(document.getElementById('limit-buy-step-wait-sec').value),
         }
       };
 
@@ -279,6 +347,11 @@
         loadStatus();
       });
     });
+  });
+
+  // 장중 손절 감시 카드의 저장 버튼은 공통 저장 버튼을 재사용
+  document.getElementById('intraday-save-btn').addEventListener('click', function(){
+    document.getElementById('save-btn').click();
   });
 
   document.getElementById('run-once-btn').addEventListener('click', function(){

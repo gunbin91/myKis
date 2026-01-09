@@ -29,6 +29,8 @@ def setup_logger(name=None, log_file: str | None = None):
     # 로거 생성
     logger = logging.getLogger(name if name else 'myKis')
     logger.setLevel(logging.INFO)
+    # 로거 이름이 계층(myKis.mock 등)인 경우, 상위 로거로 propagate 되면서 중복 출력될 수 있음
+    logger.propagate = False
     
     # 중복 핸들러 방지
     if logger.handlers:

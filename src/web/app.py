@@ -1,5 +1,6 @@
 from flask import Flask, render_template, jsonify, request, redirect
 from apscheduler.schedulers.background import BackgroundScheduler
+import threading
 import os
 import glob
 import yaml
@@ -11,6 +12,8 @@ from src.config.config_manager import config_manager
 from src.api.order import kis_order
 from src.api.quote import kis_quote
 from src.utils.logger import logger
+from src.engine.position_store import PositionStore
+from src.utils.fx_rate import get_usd_krw_rate
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 TEMPLATES_DIR = PROJECT_ROOT / "templates"
@@ -24,15 +27,50 @@ app = Flask(
 
 # 스케줄러 설정
 scheduler = BackgroundScheduler()
-# 1분마다 자동매매 엔진 실행
-scheduler.add_job(func=trading_engine.run, trigger="interval", seconds=60, id="auto_trading")
-# 1분마다 장중 손절 감시
-scheduler.add_job(func=trading_engine.stop_loss_watch, trigger="interval", seconds=60, id="stop_loss_watch")
-scheduler.start()
+_scheduler_started = False
+_scheduler_lock = threading.Lock()
+
+def start_scheduler():
+    """
+    스케줄러 시작은 import 시점이 아니라 '서버 실행 시점'에만 수행.
+    - myKiwoom-main처럼 reloader/다중 import 환경에서 중복 시작 위험을 낮춤
+    """
+    global _scheduler_started
+    with _scheduler_lock:
+        if _scheduler_started:
+            return
+
+        # 1분마다 자동매매 엔진 실행 (중복 실행/밀림 방지 옵션 포함)
+        scheduler.add_job(
+            func=trading_engine.run,
+            trigger="interval",
+            seconds=60,
+            id="auto_trading",
+            replace_existing=True,
+            max_instances=1,
+            coalesce=True,
+            misfire_grace_time=30,
+        )
+        # 1분마다 장중 손절 감시
+        scheduler.add_job(
+            func=trading_engine.stop_loss_watch,
+            trigger="interval",
+            seconds=60,
+            id="stop_loss_watch",
+            replace_existing=True,
+            max_instances=1,
+            coalesce=True,
+            misfire_grace_time=30,
+        )
+
+        if not scheduler.running:
+            scheduler.start()
+        _scheduler_started = True
 
 # 즉시 실행 미리보기(서버 메모리 임시 저장)
 _TRADE_PREVIEWS: dict[str, dict] = {}
-_TRADE_PREVIEW_TTL_SEC = 300
+# 분석서버 실시간 분석은 수분~수십분까지 걸릴 수 있어 TTL을 넉넉히 잡는다.
+_TRADE_PREVIEW_TTL_SEC = 1800  # 30분
 
 @app.route('/')
 def dashboard():
@@ -115,18 +153,22 @@ def settings_page():
 def get_status():
     """현재 상태 및 잔고 조회 (AJAX)"""
     # 간단한 상태 정보
-    job = scheduler.get_job("auto_trading")
-    job_watch = scheduler.get_job("stop_loss_watch")
-    next_run = None
+    job_watch = scheduler.get_job("stop_loss_watch") if scheduler else None
     next_run_watch = None
     try:
-        if job and job.next_run_time:
-            next_run = job.next_run_time.isoformat()
         if job_watch and job_watch.next_run_time:
             next_run_watch = job_watch.next_run_time.isoformat()
     except Exception:
-        next_run = None
         next_run_watch = None
+
+    # 자동매매 "실제 다음 실행 시각"(schedule_time 기준)
+    next_run = None
+    try:
+        mode = config_manager.get("common.mode", "mock")
+        dt = trading_engine.get_next_scheduled_run_at(mode=mode)
+        next_run = dt.isoformat() if dt else None
+    except Exception:
+        next_run = None
 
     status = {
         "market_open": trading_engine.is_market_open(),
@@ -141,18 +183,278 @@ def get_status():
     }
     
     # 잔고 조회 (실시간성을 위해 API 호출)
+    # - v1_006(해외주식 잔고): 보유 종목/평가손익(종목별) 위주
+    # - v1_008(체결기준현재잔고) output3: 총자산/예수금/외화사용가능/총평가손익/평가수익률(가이드 기준)
     mode = config_manager.get("common.mode", "mock")
-    balance_info = kis_order.get_balance(mode=mode)
-    balance = {}
-    
-    if balance_info:
-        output2 = balance_info.get('output2', {})
-        balance = {
-            "total_asset": output2.get('tot_evlu_pfls_amt', '0'),
-            "total_profit": output2.get('ovrs_tot_pfls', '0'),
-            "profit_rate": output2.get('tot_pftrt', '0'),
-            "stocks": balance_info.get('output1', [])
-        }
+    balance_info = kis_order.get_balance(mode=mode) or {}
+    # NATN_CD=000(전체)로 조회해야 통화별/전체 잔고 요약(output3)이 안정적으로 내려오는 편이다.
+    # (미국 840로 고정하면 계좌/상황에 따라 0으로 내려오는 케이스가 있었다)
+    present_info = kis_order.get_present_balance(natn_cd="000", tr_mket_cd="00", inqr_dvsn_cd="00", wcrc_frcr_dvsn_cd="02", mode=mode) or {}
+
+    out3 = present_info.get("output3") or {}
+    out2_raw = present_info.get("output2")
+    # KIS 응답은 output2가 dict 또는 list로 내려올 수 있어 방어적으로 처리
+    out2 = {}
+    if isinstance(out2_raw, dict):
+        out2 = out2_raw
+    elif isinstance(out2_raw, list) and out2_raw:
+        out2 = out2_raw[0] if isinstance(out2_raw[0], dict) else {}
+
+    def _to_float(v, default=0.0):
+        """
+        숫자/문자열/None 모두 안전 변환.
+        default=None 인 경우 float(None)로 죽지 않도록 None 그대로 반환한다.
+        """
+        try:
+            if v is None:
+                return default if default is None else float(default)
+            s = str(v).replace(",", "").strip()
+            if s == "":
+                return default if default is None else float(default)
+            return float(s)
+        except Exception:
+            return default if default is None else float(default)
+
+    # v1_008 output3의 evlu_erng_rt1(평가수익율1)이 모의에서 0으로 내려오는 경우가 있어,
+    # pchs_amt_smtl(매입금액합계)와 evlu_pfls_amt_smtl(평가손익금액합계)로 수익률을 계산해 보완한다.
+    pchs_amt_smtl = _to_float(out3.get("pchs_amt_smtl"))
+    evlu_pfls_amt_smtl = _to_float(out3.get("evlu_pfls_amt_smtl"))
+    computed_profit_rate = (evlu_pfls_amt_smtl / pchs_amt_smtl * 100.0) if pchs_amt_smtl != 0 else 0.0
+
+    raw_profit_rate = _to_float(out3.get("evlu_erng_rt1"), default=None)
+    # raw_profit_rate가 0인데 평가손익이 존재하면 계산값을 사용(가이드 기반 fallback)
+    profit_rate_krw = raw_profit_rate
+    if profit_rate_krw is None:
+        profit_rate_krw = computed_profit_rate
+    elif abs(profit_rate_krw) < 1e-12 and abs(evlu_pfls_amt_smtl) > 0:
+        profit_rate_krw = computed_profit_rate
+
+    # v1_006: 보유 종목 리스트 (대시보드/포트폴리오 표에 사용)
+    stocks = (balance_info.get("output1") or [])
+
+    # 자동 환율(원/달러): 사용자 입력/설정값은 사용하지 않고, KIS → FinanceDataReader 순으로 자동 조회
+    fx = get_usd_krw_rate(mode=mode, kis_present=present_info)
+    usd_krw_rate_effective = fx.rate or 0.0
+    usd_krw_rate_src = fx.source
+
+    # 보유기간(일) 계산: 가능하면 v1_007 주문체결내역으로 "최초 매수 체결일"을 추정/확정한다.
+    # - 과도한 API 호출 방지: 1일 1회만 동기화(파일 기반 PositionStore meta)
+    try:
+        store = PositionStore(mode=mode)
+        today = datetime.now().strftime("%Y%m%d")
+        held_symbols = []
+        for s in stocks:
+            try:
+                sym = (s.get("ovrs_pdno") or "").strip().upper()
+                qty = int(float(s.get("ovrs_cblc_qty", 0) or 0))
+                exch = (s.get("ovrs_excg_cd") or "").strip().upper() or "NASD"
+                if sym and qty > 0:
+                    held_symbols.append(sym)
+                    store.upsert(symbol=sym, qty=qty, exchange=exch)
+            except Exception:
+                continue
+
+        # 잔고에 없는 종목은 store에서도 정리
+        for sym in store.all_symbols():
+            if sym not in held_symbols:
+                store.upsert(symbol=sym, qty=0)
+
+        # api_sync_day가 오늘이어도, open_date가 detect(임시값)로 남아있으면 다시 동기화한다.
+        needs_sync = False
+        if held_symbols and (store.get_api_sync_day() != today):
+            needs_sync = True
+        if held_symbols and (not needs_sync):
+            for sym in held_symbols:
+                try:
+                    if (store.get_open_date_source(sym) or "detect") != "api":
+                        needs_sync = True
+                        break
+                except Exception:
+                    continue
+
+        if held_symbols and needs_sync:
+            # 주문체결내역 조회는 호출 제한/조회제약이 있을 수 있어, 최근 N일만 조회한다.
+            # - 모의: 범위를 너무 크게 잡으면 실패/빈값이 나오는 경우가 있어 보수적으로 짧게
+            # - 실전: 필요 시 늘릴 수 있음
+            end = today
+            lookback_days = 30 if mode == "mock" else 365
+            start = (datetime.now() - timedelta(days=lookback_days)).strftime("%Y%m%d")
+            hist = kis_order.get_order_history(start_date=start, end_date=end, mode=mode) or {}
+            rows = hist.get("output") or hist.get("output1") or []
+            rows = rows if isinstance(rows, list) else [rows]
+
+            def _as_yyyymmdd(v: str | None) -> str | None:
+                if not v:
+                    return None
+                vv = str(v).strip().replace("-", "").replace(".", "")
+                return vv if len(vv) == 8 and vv.isdigit() else None
+
+            def _is_buy(row: dict) -> bool:
+                v = str(
+                    row.get("sll_buy_dvsn")
+                    or row.get("sll_buy_dvsn_cd")
+                    or row.get("sll_buy_dvsn_name")
+                    or row.get("SLL_BUY_DVSN")
+                    or ""
+                ).strip().lower()
+                # 휴리스틱: 'buy/매수' 포함 또는 코드값이 2 계열이면 매수로 간주
+                if ("buy" in v) or ("매수" in v):
+                    return True
+                if v in ("02", "2", "buy"):
+                    return True
+                return False
+
+            def _filled_qty(row: dict) -> float:
+                # v1_007(주문체결내역)에서 모의/실전 필드명이 다를 수 있어 폭넓게 대응
+                for k in (
+                    "ft_ccld_qty",  # 모의: 해외체결수량
+                    "ccld_qty",
+                    "CCLD_QTY",
+                    "ccld_qty1",
+                    "ccld_qty2",
+                    "tot_ccld_qty",
+                    "tot_ccld_qty1",
+                    "ft_ord_qty",  # 최악의 폴백(주문수량)
+                ):
+                    if k in row and row.get(k) is not None:
+                        try:
+                            return float(str(row.get(k)).replace(",", ""))
+                        except Exception:
+                            pass
+                return 0.0
+
+            last_buy_date: dict[str, str] = {}
+            for r in rows:
+                if not isinstance(r, dict):
+                    continue
+                sym = (r.get("pdno") or r.get("PDNO") or r.get("ovrs_pdno") or "").strip().upper()
+                if not sym or sym not in held_symbols:
+                    continue
+                if _filled_qty(r) <= 0:
+                    continue
+                if not _is_buy(r):
+                    continue
+
+                d = _as_yyyymmdd(
+                    r.get("trad_day")
+                    or r.get("TRAD_DAY")
+                    or r.get("ord_dt")
+                    or r.get("ORD_DT")
+                    or r.get("ccld_dt")
+                    or r.get("CCLD_DT")
+                )
+                if not d:
+                    continue
+                cur = last_buy_date.get(sym)
+                if (cur is None) or (d > cur):
+                    last_buy_date[sym] = d
+
+            updated_any = False
+            for sym, d in last_buy_date.items():
+                store.set_open_date(symbol=sym, open_date=d, source="api")
+                updated_any = True
+            # 동기화가 실제로 성공(업데이트 발생)했을 때만 api_sync_day 갱신
+            if updated_any:
+                store.set_api_sync_day(today)
+
+        # stocks에 보유기간 필드 주입
+        for s in stocks:
+            try:
+                sym = (s.get("ovrs_pdno") or "").strip().upper()
+                if not sym:
+                    continue
+                od = store.get_open_date(sym)
+                s["open_date"] = od
+                if od and len(od) == 8:
+                    days = (datetime.now().date() - datetime.strptime(od, "%Y%m%d").date()).days
+                    s["holding_days"] = int(days)
+                else:
+                    s["holding_days"] = None
+            except Exception:
+                s["holding_days"] = None
+    except Exception:
+        # 보유기간은 보조정보이므로 실패해도 status는 반환
+        pass
+
+    # 주문가능금액(USD) 산정:
+    # - 실전: 해외주식-035(해외증거금 통화별조회) USD의 itgr_ord_psbl_amt(통합주문가능금액)을 최우선 사용
+    # - 모의: 해외주식-035 미지원.
+    #   v1_008 output3.frcr_use_psbl_amt가 0으로 내려오는 케이스가 있어,
+    #   output2(통화별)에서 USD의 외화출금가능금액(frcr_drwg_psbl_amt_1) 또는 외화예수금(frcr_dncl_amt_2)을 우선 사용한다.
+    #   그래도 0이면(=모의에서 USD 예수금이 안 내려오는 케이스), 통합증거금 효과를 "총자산(원화) / 환율"로 추정해
+    #   자동매매 예산 산정이 0으로 막히지 않게 한다(모의 모드에서만).
+    fx_orderable_amt = None
+    fx_orderable_source = None
+    try:
+        if mode == "real":
+            fm = kis_order.get_foreign_margin(mode=mode) or {}
+            rows = fm.get("output") or []
+            rows = rows if isinstance(rows, list) else [rows]
+            usd = None
+            for r in rows:
+                if isinstance(r, dict) and (str(r.get("crcy_cd") or "").strip().upper() == "USD"):
+                    usd = r
+                    break
+            if usd:
+                fx_orderable_amt = _to_float(usd.get("itgr_ord_psbl_amt"), default=None)
+                fx_orderable_source = "035_itgr"
+        if fx_orderable_amt is None:
+            # mock(또는 실전 035 실패) fallback
+            usd_row = None
+            try:
+                if isinstance(out2_raw, list):
+                    for r in out2_raw:
+                        if isinstance(r, dict) and (str(r.get("crcy_cd") or "").strip().upper() == "USD"):
+                            usd_row = r
+                            break
+            except Exception:
+                usd_row = None
+
+            if usd_row:
+                # 출금가능 외화금액(우선) -> 예수금
+                fx_orderable_amt = _to_float(usd_row.get("frcr_drwg_psbl_amt_1"), default=None)
+                if fx_orderable_amt is None or fx_orderable_amt <= 0:
+                    fx_orderable_amt = _to_float(usd_row.get("frcr_dncl_amt_2"), default=None)
+                fx_orderable_source = "008_out2_usd"
+
+            if fx_orderable_amt is None:
+                fx_orderable_amt = _to_float(out3.get("frcr_use_psbl_amt"), default=0.0)
+                fx_orderable_source = "008_frcr_use"
+
+            # mock 마지막 fallback: 총자산(원화) 기반 추정(통합증거금/자동환전 느낌의 "총가용"을 흉내)
+            if mode == "mock" and (fx_orderable_amt is None or fx_orderable_amt <= 0):
+                tot_asst_krw = _to_float(out3.get("tot_asst_amt"), default=0.0)
+                if usd_krw_rate_effective > 0 and tot_asst_krw > 0:
+                    fx_orderable_amt = tot_asst_krw / usd_krw_rate_effective
+                    fx_orderable_source = "mock_est_tot_asset"
+    except Exception:
+        fx_orderable_amt = _to_float(out3.get("frcr_use_psbl_amt"), default=0.0)
+        fx_orderable_source = "008_frcr_use"
+
+    balance = {
+        "stocks": stocks,
+
+        # v1_008(output3): 자산 요약 (원화 기준이 대부분)
+        "total_asset_krw": out3.get("tot_asst_amt", "0"),          # 총자산금액
+        "eval_amount_krw": out3.get("evlu_amt_smtl") or out3.get("evlu_amt_smtl_amt", "0"),  # 평가금액합계(원화)
+        "deposit_krw": out3.get("tot_dncl_amt") or out3.get("dncl_amt", "0"),  # (총)예수금액
+        "withdrawable_krw": out3.get("wdrw_psbl_tot_amt", "0"),    # 인출가능총금액
+        "fx_use_psbl_amt": out3.get("frcr_use_psbl_amt", "0"),     # 외화사용가능금액(통화는 계좌/시장 상황에 따름)
+        # 주문가능금액(USD) - "총예산 ÷ 매수종목수" 산정에 사용
+        "fx_orderable_amt": str(fx_orderable_amt),
+        "fx_orderable_source": fx_orderable_source,
+        # USD/KRW 환율(원/달러) - 자동(008) 우선, 설정값은 fallback
+        "usd_krw_rate": str(usd_krw_rate_effective) if usd_krw_rate_effective > 0 else "0",
+        "usd_krw_rate_source": usd_krw_rate_src or "unavailable",
+        # 평가손익/수익률은 가이드상 원화환산 합계가 존재하므로 우선 사용
+        "total_profit_krw": out3.get("evlu_pfls_amt_smtl") or out3.get("tot_evlu_pfls_amt", "0"),  # 평가손익금액합계(우선) / 총평가손익금액(대체)
+        "profit_rate_krw": str(profit_rate_krw),                    # 평가수익율1(우선) / 계산값 fallback
+
+        # 하위 호환(기존 UI/코드가 참조하던 키). 이제 '총자산/손익/수익률'은 v1_008 기준으로 맞춘다.
+        "total_asset": out3.get("tot_asst_amt", "0"),
+        "total_profit": out3.get("evlu_pfls_amt_smtl") or out3.get("tot_evlu_pfls_amt", "0"),
+        "profit_rate": str(profit_rate_krw),
+    }
     
     return jsonify({"status": status, "balance": balance})
 
@@ -492,6 +794,36 @@ def api_auto_trading_get_strategy():
     try:
         mode = request.args.get("mode") or config_manager.get("common.mode", "mock")
         strategy = config_manager.get(f"{mode}.strategy", {}) or {}
+        # autokiwoomstock 스타일: 투자금액 입력 없음. (기존 max_buy_amount/investment_amount는 무시)
+        if isinstance(strategy, dict):
+            strategy.pop("investment_amount", None)
+            strategy.pop("max_buy_amount", None)
+            # reserve_cash는 구버전(USD). UI는 reserve_cash_krw(원화)로 보여준다.
+            if ("reserve_cash_krw" not in strategy) or (strategy.get("reserve_cash_krw") is None):
+                usd_krw = float(config_manager.get("common.usd_krw_rate", 1350.0) or 1350.0)
+                try:
+                    legacy_usd = float(strategy.get("reserve_cash", 0) or 0.0)
+                except Exception:
+                    legacy_usd = 0.0
+                if legacy_usd > 0 and usd_krw > 0:
+                    strategy["reserve_cash_krw"] = legacy_usd * usd_krw
+                else:
+                    strategy["reserve_cash_krw"] = 0
+            # reserve_cash는 더 이상 UI/저장에서 사용하지 않음
+            strategy.pop("reserve_cash", None)
+            if ("top_n" not in strategy) or (strategy.get("top_n") is None):
+                strategy["top_n"] = 5
+            if ("max_hold_days" not in strategy) and (strategy.get("max_hold_period") is not None):
+                strategy["max_hold_days"] = strategy.get("max_hold_period")
+            # 매수 주문 방식/가드 기본값
+            if ("buy_order_method" not in strategy) or (strategy.get("buy_order_method") is None):
+                strategy["buy_order_method"] = "limit_ask_ladder" if mode == "real" else "limit_slippage"
+            if ("limit_buy_max_premium_pct" not in strategy) or (strategy.get("limit_buy_max_premium_pct") is None):
+                strategy["limit_buy_max_premium_pct"] = 1.0
+            if ("limit_buy_max_levels" not in strategy) or (strategy.get("limit_buy_max_levels") is None):
+                strategy["limit_buy_max_levels"] = 5
+            if ("limit_buy_step_wait_sec" not in strategy) or (strategy.get("limit_buy_step_wait_sec") is None):
+                strategy["limit_buy_step_wait_sec"] = 1.0
         intraday = config_manager.get(f"{mode}.intraday_stop_loss", {}) or {}
         schedule = {
             "schedule_time": config_manager.get(f"{mode}.schedule_time", "22:30"),
@@ -499,7 +831,7 @@ def api_auto_trading_get_strategy():
         common = {
             "analysis_mock_enabled": bool(config_manager.get("common.analysis_mock_enabled", False)),
             "analysis_host": config_manager.get("common.analysis_host", "localhost"),
-            "analysis_port": int(config_manager.get("common.analysis_port", 5000) or 5000),
+            "analysis_port": int(config_manager.get("common.analysis_port", 5500) or 5500),
         }
         return jsonify({"success": True, "mode": mode, "strategy": strategy, "common": common, "intraday_stop_loss": intraday, "schedule": schedule})
     except Exception as e:
@@ -528,11 +860,31 @@ def api_auto_trading_set_strategy():
             config_manager._config["common"]["analysis_host"] = str(common_in.get("analysis_host")).strip()
         if "analysis_port" in common_in and common_in.get("analysis_port"):
             config_manager._config["common"]["analysis_port"] = int(common_in.get("analysis_port"))
+        # usd_krw_rate: 사용자 입력은 받지 않음(안전상). 자동 환율(KIS→FDR)만 사용.
 
         # 3) strategy (mode별)
         st_in = payload.get("strategy") or {}
         config_manager._config[mode].setdefault("strategy", {})
-        for k in ("max_buy_amount","reserve_cash","take_profit_pct","stop_loss_pct","max_hold_days","slippage_pct"):
+        if ("max_hold_days" not in st_in) and (st_in.get("max_hold_period") is not None):
+            st_in["max_hold_days"] = st_in.get("max_hold_period")
+
+        # autokiwoomstock 스타일: investment_amount/max_buy_amount 저장하지 않음
+        st_in.pop("investment_amount", None)
+        st_in.pop("max_buy_amount", None)
+
+        for k in (
+            "top_n",
+            "reserve_cash_krw",
+            "take_profit_pct",
+            "stop_loss_pct",
+            "max_hold_days",
+            "slippage_pct",
+            # 매수 방식/가드
+            "buy_order_method",
+            "limit_buy_max_premium_pct",
+            "limit_buy_max_levels",
+            "limit_buy_step_wait_sec",
+        ):
             if k in st_in and st_in.get(k) is not None:
                 config_manager._config[mode]["strategy"][k] = st_in.get(k)
 
@@ -610,11 +962,256 @@ def start_trade():
         # 비동기로 실행하지 않고 즉시 실행 (응답 대기) 또는 스레드로 실행
         # 여기서는 즉시 실행 시킴
         import threading
-        t = threading.Thread(target=trading_engine.run)
+        t = threading.Thread(target=trading_engine.run_once)
         t.start()
         return jsonify({"result": "started", "message": "자동매매 로직이 시작되었습니다."})
     else:
         return jsonify({"result": "running", "message": "이미 실행 중입니다."})
+
+def _build_trade_preview_view(analysis: dict | None, mode: str) -> dict:
+    """
+    autokiwoomstock UX처럼 "즉시실행 미리보기"에서 바로 이해할 수 있는 데이터 생성.
+    - 매도 대상: 손절/익절/최대보유 + (가능하면) 분석 SELL
+    - 매수 대상: 분석 BUY 상위 top_n (보유종목 제외), 예산 기반 예상수량
+    """
+    analysis = analysis or {}
+
+    def _to_float(v, default=0.0) -> float:
+        try:
+            if v is None:
+                return float(default)
+            s = str(v).replace(",", "").strip()
+            if s == "":
+                return float(default)
+            return float(s)
+        except Exception:
+            return float(default)
+
+    def _to_int(v, default=0) -> int:
+        try:
+            if v is None:
+                return int(default)
+            return int(float(str(v).replace(",", "").strip() or default))
+        except Exception:
+            return int(default)
+
+    # 전략 파라미터
+    top_n = _to_int(config_manager.get(f"{mode}.strategy.top_n", 5), 5)
+    reserve_cash_krw = _to_float(config_manager.get(f"{mode}.strategy.reserve_cash_krw", 0), 0.0)
+    stop_loss_pct = _to_float(config_manager.get(f"{mode}.strategy.stop_loss_pct", -3.0), -3.0)
+    take_profit_pct = _to_float(config_manager.get(f"{mode}.strategy.take_profit_pct", 5.0), 5.0)
+    max_hold_days = _to_int(config_manager.get(f"{mode}.strategy.max_hold_days", 15), 15)
+
+    # 주문가능(USD) 계산: 035(실전) -> 008(output2 USD) -> 008(output3 frcr_use) -> mock 추정(총자산/환율)
+    present = kis_order.get_present_balance(
+        natn_cd="000", tr_mket_cd="00", inqr_dvsn_cd="00", wcrc_frcr_dvsn_cd="02", mode=mode
+    ) or {}
+    out3 = present.get("output3") or {}
+    # 자동 환율(원/달러): v1_008 output3의 frst_bltn_exrt(최초고시환율)을 우선 사용하고 실패 시 설정값 fallback
+    # 자동 환율(원/달러): 사용자 입력/설정값은 사용하지 않고, KIS → FinanceDataReader 순으로 자동 조회
+    fx = get_usd_krw_rate(mode=mode, kis_present=present)
+    usd_krw_rate = fx.rate or 0.0
+    usd_krw_rate_source = fx.source
+
+    reserve_cash_usd = (reserve_cash_krw / usd_krw_rate) if usd_krw_rate > 0 else 0.0
+
+    out2_raw = present.get("output2") or []
+    out2_list = out2_raw if isinstance(out2_raw, list) else [out2_raw]
+
+    orderable_usd = 0.0
+    orderable_source = None
+    if mode == "real":
+        try:
+            fm = kis_order.get_foreign_margin(mode=mode) or {}
+            rows = fm.get("output") or []
+            rows = rows if isinstance(rows, list) else [rows]
+            for r in rows:
+                if isinstance(r, dict) and (str(r.get("crcy_cd") or "").strip().upper() == "USD"):
+                    orderable_usd = _to_float(r.get("itgr_ord_psbl_amt"), 0.0)
+                    orderable_source = "035_itgr"
+                    break
+        except Exception:
+            pass
+
+    if orderable_usd <= 0:
+        usd_row = None
+        for r in out2_list:
+            if isinstance(r, dict) and (str(r.get("crcy_cd") or "").strip().upper() == "USD"):
+                usd_row = r
+                break
+        if usd_row:
+            orderable_usd = _to_float(usd_row.get("frcr_drwg_psbl_amt_1"), 0.0)
+            if orderable_usd <= 0:
+                orderable_usd = _to_float(usd_row.get("frcr_dncl_amt_2"), 0.0)
+            orderable_source = "008_out2_usd"
+
+    if orderable_usd <= 0:
+        orderable_usd = _to_float(out3.get("frcr_use_psbl_amt"), 0.0)
+        orderable_source = "008_frcr_use"
+
+    if mode == "mock" and orderable_usd <= 0:
+        tot_asst_krw = _to_float(out3.get("tot_asst_amt"), 0.0)
+        if usd_krw_rate > 0 and tot_asst_krw > 0:
+            orderable_usd = tot_asst_krw / usd_krw_rate
+            orderable_source = "mock_est_tot_asset"
+
+    total_budget_usd = max(0.0, orderable_usd - reserve_cash_usd)
+
+    # 분석 데이터 정규화 (buy)
+    raw_buy = analysis.get("buy") or []
+    raw_sell = analysis.get("sell") or []
+    buy_items = []
+    for item in (raw_buy if isinstance(raw_buy, list) else [raw_buy]):
+        if isinstance(item, dict):
+            code = (item.get("code") or item.get("ticker") or item.get("symbol") or "").strip().upper()
+            exc = (item.get("exchange") or "NAS").strip().upper()
+            if code:
+                buy_items.append({
+                    "code": code,
+                    "exchange": exc,
+                    "name": item.get("name"),
+                    "price": item.get("price"),
+                    "score": item.get("score"),
+                    "prob": item.get("prob"),
+                })
+        else:
+            code = (str(item) or "").strip().upper()
+            if code:
+                buy_items.append({"code": code, "exchange": "NAS"})
+
+    sell_codes = set()
+    for item in (raw_sell if isinstance(raw_sell, list) else [raw_sell]):
+        if isinstance(item, dict):
+            c = (item.get("code") or item.get("ticker") or item.get("symbol") or "").strip().upper()
+        else:
+            c = (str(item) or "").strip().upper()
+        if c:
+            sell_codes.add(c)
+
+    # 보유종목 가져오기
+    bal = kis_order.get_balance(mode=mode) or {}
+    holdings = bal.get("output1") or []
+    holdings = holdings if isinstance(holdings, list) else [holdings]
+    held_map: dict[str, dict] = {}
+    for h in holdings:
+        if not isinstance(h, dict):
+            continue
+        sym = (h.get("ovrs_pdno") or "").strip().upper()
+        if sym:
+            held_map[sym] = h
+
+    # 보유기간(일)
+    holding_days_map: dict[str, int | None] = {}
+    try:
+        from src.engine.position_store import PositionStore
+        store = PositionStore(mode=mode)
+        for sym in held_map.keys():
+            od = store.get_open_date(sym)
+            if od and len(od) == 8:
+                try:
+                    holding_days_map[sym] = int((datetime.now().date() - datetime.strptime(od, "%Y%m%d").date()).days)
+                except Exception:
+                    holding_days_map[sym] = None
+            else:
+                holding_days_map[sym] = None
+    except Exception:
+        pass
+
+    # 매도 후보 생성 (엔진 로직과 최대한 유사하게)
+    sell_candidates = []
+    for sym, h in held_map.items():
+        qty = _to_float(h.get("ovrs_cblc_qty"), 0.0)
+        if qty <= 0:
+            continue
+        pr = _to_float(h.get("evlu_pfls_rt"), 0.0)
+        reasons = []
+        if sym in sell_codes:
+            reasons.append("분석 SELL")
+        if pr <= stop_loss_pct:
+            reasons.append(f"손절({pr:.2f}% ≤ {stop_loss_pct:.2f}%)")
+        if pr >= take_profit_pct:
+            reasons.append(f"익절({pr:.2f}% ≥ {take_profit_pct:.2f}%)")
+        hd = holding_days_map.get(sym)
+        if (hd is not None) and (max_hold_days > 0) and (hd >= max_hold_days):
+            reasons.append(f"최대보유({hd}d ≥ {max_hold_days}d)")
+        if not reasons:
+            continue
+        cur = _to_float(h.get("now_pric2"), 0.0)
+        avg = _to_float(h.get("pchs_avg_pric"), 0.0)
+        sell_candidates.append({
+            "code": sym,
+            "name": h.get("ovrs_item_name") or sym,
+            "qty": qty,
+            "avg_price": avg,
+            "current_price": cur,
+            "profit_rate": pr,
+            "holding_days": hd,
+            "est_amount": (qty * cur) if cur > 0 else None,
+            "reasons": reasons,
+        })
+
+    # 매수 후보 생성 (상위 top_n, 보유종목 제외)
+    candidates = [x for x in buy_items if x.get("code") and x.get("code") not in held_map][:max(0, top_n)]
+    per_stock_budget = (total_budget_usd / len(candidates)) if candidates else 0.0
+
+    buy_candidates = []
+    for idx, c in enumerate(candidates, start=1):
+        sym = c.get("code")
+        exc = c.get("exchange") or "NAS"
+        name = c.get("name") or sym
+        price = _to_float(c.get("price"), 0.0)
+        if price <= 0:
+            try:
+                p = kis_quote.get_current_price(exc, sym, mode=mode) or {}
+                price = _to_float(p.get("last"), 0.0)
+            except Exception:
+                price = 0.0
+        qty = int(per_stock_budget // price) if price > 0 else 0
+        buy_candidates.append({
+            "rank": idx,
+            "code": sym,
+            "name": name,
+            "exchange": exc,
+            "current_price": price if price > 0 else None,
+            "score": c.get("score"),
+            "prob": c.get("prob"),
+            "per_stock_budget": per_stock_budget,
+            "est_qty": qty,
+            "est_amount": (qty * price) if (qty > 0 and price > 0) else None,
+            "reason": "분석 상위 추천",
+        })
+
+    meta = analysis.get("meta") or {}
+    analysis_date = meta.get("analysis_date")
+    total_stocks = meta.get("total_stocks")
+
+    return {
+        "mode": mode,
+        "analysis": {
+            "analysis_date": analysis_date,
+            "total_stocks": total_stocks,
+        },
+        "strategy": {
+            "top_n": top_n,
+            "reserve_cash_krw": reserve_cash_krw,
+            "usd_krw_rate": usd_krw_rate,
+            "usd_krw_rate_source": usd_krw_rate_source,
+            "reserve_cash_usd": reserve_cash_usd,
+            "stop_loss_pct": stop_loss_pct,
+            "take_profit_pct": take_profit_pct,
+            "max_hold_days": max_hold_days,
+        },
+        "budget": {
+            "orderable_usd": orderable_usd,
+            "orderable_source": orderable_source,
+            "usd_krw_rate": usd_krw_rate,
+            "usd_krw_rate_source": usd_krw_rate_source,
+            "total_budget_usd": total_budget_usd,
+            "per_stock_budget_usd": per_stock_budget,
+        },
+        "sell_candidates": sell_candidates,
+        "buy_candidates": buy_candidates,
+    }
 
 @app.route('/api/trade/preview', methods=['POST'])
 def api_trade_preview():
@@ -624,22 +1221,91 @@ def api_trade_preview():
     """
     try:
         mode = config_manager.get("common.mode", "mock")
-        analysis = trading_engine.get_analysis_data()
         preview_id = str(uuid4())
         now = datetime.now()
         _TRADE_PREVIEWS[preview_id] = {
             "mode": mode,
             "created_at": now.isoformat(),
             "expires_at": (now + timedelta(seconds=_TRADE_PREVIEW_TTL_SEC)).isoformat(),
-            "analysis": analysis,
+            "status": "running",  # running|ready|error
+            "analysis": None,
+            "error": None,
         }
+
+        # 실시간 분석 실행은 오래 걸릴 수 있으므로 백그라운드에서 수행
+        def _run_analysis_for_preview(pid: str):
+            try:
+                item = _TRADE_PREVIEWS.get(pid)
+                if not item:
+                    return
+                # 만료되었으면 중단
+                try:
+                    exp = item.get("expires_at")
+                    if exp and datetime.fromisoformat(exp) < datetime.now():
+                        _TRADE_PREVIEWS.pop(pid, None)
+                        return
+                except Exception:
+                    pass
+
+                analysis = trading_engine.get_analysis_data()  # 실시간 분석(폴링)
+
+                # autokiwoomstock UX처럼: 미리보기에서 바로 이해할 수 있는 "뷰 데이터"를 생성
+                try:
+                    view = _build_trade_preview_view(analysis=analysis, mode=item.get("mode") or config_manager.get("common.mode", "mock"))
+                except Exception as ve:
+                    view = {"error": f"preview_view_build_failed: {ve}"}
+
+                item["analysis"] = analysis
+                item["view"] = view
+                item["status"] = "ready"
+            except Exception as e:
+                item = _TRADE_PREVIEWS.get(pid)
+                if item:
+                    item["status"] = "error"
+                    item["error"] = str(e)
+
+        t = threading.Thread(target=_run_analysis_for_preview, args=(preview_id,), daemon=True)
+        t.start()
+
         return jsonify({
             "success": True,
             "preview_id": preview_id,
             "mode": mode,
-            "analysis": analysis,
+            "status": _TRADE_PREVIEWS[preview_id]["status"],
             "created_at": _TRADE_PREVIEWS[preview_id]["created_at"],
             "expires_at": _TRADE_PREVIEWS[preview_id]["expires_at"],
+        })
+    except Exception as e:
+        return jsonify({"success": False, "message": str(e)})
+
+
+@app.route('/api/trade/preview/<preview_id>', methods=['GET'])
+def api_trade_preview_status(preview_id):
+    """미리보기 진행 상태/결과 조회 (폴링용)"""
+    try:
+        item = _TRADE_PREVIEWS.get(preview_id)
+        if not item:
+            return jsonify({"success": False, "message": "preview_not_found"})
+
+        # 만료 체크
+        expires_at = item.get("expires_at")
+        try:
+            if expires_at and datetime.fromisoformat(expires_at) < datetime.now():
+                _TRADE_PREVIEWS.pop(preview_id, None)
+                return jsonify({"success": False, "message": "preview_expired"})
+        except Exception:
+            pass
+
+        return jsonify({
+            "success": True,
+            "preview_id": preview_id,
+            "mode": item.get("mode"),
+            "status": item.get("status", "running"),
+            "analysis": item.get("analysis"),
+            "view": item.get("view"),
+            "error": item.get("error"),
+            "created_at": item.get("created_at"),
+            "expires_at": item.get("expires_at"),
         })
     except Exception as e:
         return jsonify({"success": False, "message": str(e)})
@@ -676,6 +1342,9 @@ def api_trade_execute():
         if trading_engine.is_running:
             return jsonify({"success": False, "message": "engine_running"})
 
+        if item.get("status") != "ready" or item.get("analysis") is None:
+            return jsonify({"success": False, "message": "preview_not_ready"})
+
         analysis = item.get("analysis") or {"buy": [], "sell": []}
 
         import threading
@@ -688,4 +1357,5 @@ def api_trade_execute():
 
 if __name__ == '__main__':
     # 테스트용 단독 실행 (기본 포트 7500)
+    start_scheduler()
     app.run(host='0.0.0.0', port=7500, debug=False)

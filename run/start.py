@@ -8,7 +8,7 @@ from threading import Timer
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.append(PROJECT_ROOT)
 
-from src.web.app import app
+from src.web.app import app, start_scheduler
 from src.utils.logger import logger
 
 def find_available_port(start_port=7500, max_port=7600):
@@ -29,6 +29,9 @@ if __name__ == "__main__":
         port = find_available_port()
         logger.info(f"=== myKis 시스템 시작 (Port: {port}) ===")
         
+        # 스케줄러는 서버 실행 시점에만 시작 (중복 시작 방지)
+        start_scheduler()
+
         # 서버 시작 1.5초 후 브라우저 자동 실행
         Timer(1.5, open_browser, args=[port]).start()
         

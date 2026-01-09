@@ -66,7 +66,11 @@ class ConfigManager:
 
         default_config = {
             'common': {
-                'analysis_url': 'http://localhost:5000/analysis',
+                'analysis_url': 'http://localhost:5500/v1/analysis/result',
+                'analysis_host': 'localhost',
+                'analysis_port': 5500,
+                # reserve_cash_krw(원화)을 USD 예산으로 환산할 때 사용하는 기준 환율(사용자 입력/환경에 맞게 조정)
+                'usd_krw_rate': 1350.0,
                 'mode': 'mock',
                 # 분석서버 대신 mock 데이터를 사용할지 여부 (테스트용)
                 'analysis_mock_enabled': False,
@@ -86,14 +90,26 @@ class ConfigManager:
                 # 자동매매 실행시간(1일 1회) - 1분 주기 체크로 해당 시각에만 실행
                 'schedule_time': '22:30',
                 'strategy': {
-                    # 총 매수 예산(USD) - 종목 수만큼 N분할
-                    'max_buy_amount': 1000,
-                    'reserve_cash': 0,
+                    'top_n': 5,
+                    # 매수 제외 금액(원화) - UI에서 입력
+                    'reserve_cash_krw': 0,
                     'take_profit_pct': 5.0,
-                    'stop_loss_pct': 3.0,
+                    # 손절/익절은 부호 그대로 사용(프론트에서 ± 입력 가능)
+                    # 예) -3 => -3% 손절
+                    'stop_loss_pct': -3.0,
                     'max_hold_days': 15,
                     # 지정가 기반에서 체결 확률을 올리기 위한 슬리피지(%)
                     'slippage_pct': 0.5,
+                    # 매수 주문 방식:
+                    # - mock: 호가 API 미지원 → 현재가(+slippage) 지정가
+                    # - real: 매도호가 기반 지정가(ask ladder) 권장
+                    'buy_order_method': 'limit_slippage',
+                    # ask ladder 매수 시, 현재가 대비 허용 프리미엄 상한(+%)
+                    'limit_buy_max_premium_pct': 1.0,
+                    # ask ladder 매수 시, 최대 시도 호가 레벨(미국: 최대 10)
+                    'limit_buy_max_levels': 5,
+                    # 호가 단계별 체결/미체결 확인 대기(초)
+                    'limit_buy_step_wait_sec': 1.0,
                 },
                 'url_base': "https://openapivts.koreainvestment.com:29443",
             },
@@ -109,12 +125,16 @@ class ConfigManager:
                 },
                 'schedule_time': '22:30',
                 'strategy': {
-                    'max_buy_amount': 500,
-                    'reserve_cash': 1000,
+                    'top_n': 3,
+                    'reserve_cash_krw': 0,
                     'take_profit_pct': 3.0,
-                    'stop_loss_pct': 2.0,
+                    'stop_loss_pct': -2.0,
                     'max_hold_days': 10,
                     'slippage_pct': 0.5,
+                    'buy_order_method': 'limit_ask_ladder',
+                    'limit_buy_max_premium_pct': 1.0,
+                    'limit_buy_max_levels': 5,
+                    'limit_buy_step_wait_sec': 1.0,
                 },
                 'url_base': "https://openapi.koreainvestment.com:9443",
             },

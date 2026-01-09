@@ -84,6 +84,11 @@
                             <li><a class="dropdown-item" href="#" onclick="changeMode('real')">🔴 실전투자 (Real)</a></li>
                         </ul>
                     </div>
+                    <div class="btn-group me-2" role="group" aria-label="currency-toggle">
+                        <button type="button" class="btn btn-sm btn-outline-light" id="btn-currency-usd">USD</button>
+                        <button type="button" class="btn btn-sm btn-outline-light" id="btn-currency-krw">KRW</button>
+                    </div>
+                    <div class="small text-muted me-2" id="currency-fx-text" style="min-width: 180px;"></div>
                     <button class="btn btn-sm btn-outline-success" onclick="openTradePreview()"><i class="fas fa-play me-1"></i>즉시 실행</button>
                 </div>
             </div>
@@ -94,39 +99,93 @@
         {% block content %}{% endblock %}
     </div>
 
-    <!-- 즉시 실행: 미리보기 모달 -->
+    <!-- 즉시 실행: 미리보기 모달 (autokiwoomstock 스타일) -->
     <div class="modal fade" id="tradePreviewModal" tabindex="-1" aria-hidden="true">
-      <div class="modal-dialog modal-lg modal-dialog-centered">
+      <div class="modal-dialog modal-xl modal-dialog-centered">
         <div class="modal-content bg-dark border-secondary">
           <div class="modal-header border-secondary">
             <h5 class="modal-title"><i class="fas fa-play me-2"></i>즉시 실행 - 미리보기</h5>
             <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
           </div>
           <div class="modal-body">
-            <div class="small text-muted mb-2">
-              분석 서버에서 받은 결과를 먼저 확인하고, 확인 버튼을 눌러야 매매가 실행됩니다.
+            <div class="small text-muted mb-3">
+              분석 결과를 먼저 확인하고, <strong>확인 후 실행</strong>을 눌러야 실제 주문이 나갑니다.
             </div>
-            <div class="row g-3">
+
+            <div class="row g-3 mb-3">
               <div class="col-md-6">
                 <div class="card bg-dark border-secondary">
-                  <div class="card-header border-secondary"><strong>BUY</strong></div>
-                  <div class="card-body">
-                    <pre class="mb-0" style="white-space:pre-wrap; min-height:140px;" id="preview-buy">-</pre>
+                  <div class="card-header border-secondary"><strong>분석 정보</strong></div>
+                  <div class="card-body small">
+                    <div>분석 날짜: <span id="preview-analysis-date">-</span></div>
+                    <div>총 종목 수: <span id="preview-total-stocks">-</span></div>
+                    <div>매도 대상: <span id="preview-sell-count">-</span></div>
+                    <div>매수 대상: <span id="preview-buy-count">-</span></div>
                   </div>
                 </div>
               </div>
               <div class="col-md-6">
                 <div class="card bg-dark border-secondary">
-                  <div class="card-header border-secondary"><strong>SELL</strong></div>
-                  <div class="card-body">
-                    <pre class="mb-0" style="white-space:pre-wrap; min-height:140px;" id="preview-sell">-</pre>
+                  <div class="card-header border-secondary"><strong>예산/전략</strong></div>
+                  <div class="card-body small">
+                    <div>주문가능(USD): <span id="preview-orderable-usd">-</span> <span class="text-muted" id="preview-orderable-src"></span></div>
+                    <div>매수 제외(USD): <span id="preview-reserve-usd">-</span></div>
+                    <div>총 예산(USD): <span id="preview-total-budget-usd">-</span></div>
+                    <div>종목당 예산(USD): <span id="preview-per-stock-usd">-</span></div>
+                    <div class="mt-2" id="preview-fx-warning"></div>
+                    <div class="text-muted">손절/익절/최대보유 기준을 반영해 매도 후보를 표시합니다.</div>
                   </div>
                 </div>
               </div>
-              <div class="col-12">
-                <div class="small text-muted" id="preview-meta">-</div>
+            </div>
+
+            <div class="mb-3">
+              <h6 class="mb-2"><i class="fas fa-arrow-down me-2"></i>매도 대상</h6>
+              <div class="table-responsive">
+                <table class="table table-sm table-dark table-hover align-middle">
+                  <thead class="table-danger">
+                    <tr>
+                      <th>종목명</th>
+                      <th>코드</th>
+                      <th class="text-end">보유수량</th>
+                      <th class="text-end">평균단가</th>
+                      <th class="text-end">현재가</th>
+                      <th class="text-end">수익률</th>
+                      <th class="text-end">보유기간</th>
+                      <th>매도사유</th>
+                    </tr>
+                  </thead>
+                  <tbody id="preview-sell-tbody">
+                    <tr><td colspan="8" class="text-center text-muted">분석 결과를 불러오는 중...</td></tr>
+                  </tbody>
+                </table>
               </div>
             </div>
+
+            <div class="mb-2">
+              <h6 class="mb-2"><i class="fas fa-arrow-up me-2"></i>매수 대상</h6>
+              <div class="table-responsive">
+                <table class="table table-sm table-dark table-hover align-middle">
+                  <thead class="table-success">
+                    <tr>
+                      <th class="text-end">순위</th>
+                      <th>종목명</th>
+                      <th>코드</th>
+                      <th>거래소</th>
+                      <th class="text-end">현재가</th>
+                      <th class="text-end">예상수량</th>
+                      <th class="text-end">예상금액</th>
+                      <th>설명</th>
+                    </tr>
+                  </thead>
+                  <tbody id="preview-buy-tbody">
+                    <tr><td colspan="8" class="text-center text-muted">분석 결과를 불러오는 중...</td></tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            <div class="small text-muted" id="preview-meta">-</div>
           </div>
           <div class="modal-footer border-secondary">
             <button type="button" class="btn btn-outline-light" data-bs-dismiss="modal">닫기</button>
@@ -142,12 +201,299 @@
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
     <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
     <script>
+        // ===== Currency preference (USD/KRW) =====
+        (function(){
+            const KEY_MODE = 'currency_mode';
+            const KEY_RATE = 'usd_krw_rate';
+            const KEY_SRC = 'usd_krw_rate_source';
+            const KEY_AT = 'usd_krw_rate_updated_at';
+
+            function getMode(){
+                return (localStorage.getItem(KEY_MODE) || 'USD').toUpperCase();
+            }
+            function setMode(m){
+                localStorage.setItem(KEY_MODE, (m || 'USD').toUpperCase());
+            }
+            function getFx(){
+                const r = parseFloat(localStorage.getItem(KEY_RATE) || '0');
+                const src = localStorage.getItem(KEY_SRC) || '';
+                const at = localStorage.getItem(KEY_AT) || '';
+                return { rate: (isNaN(r) ? 0 : r), source: src, updated_at: at };
+            }
+            function storeFxFromBalance(balance){
+                try{
+                    if(!balance) return;
+                    const r = parseFloat(balance.usd_krw_rate ?? 0);
+                    if(!isNaN(r) && r > 0){
+                        localStorage.setItem(KEY_RATE, String(r));
+                        localStorage.setItem(KEY_SRC, String(balance.usd_krw_rate_source || ''));
+                        localStorage.setItem(KEY_AT, new Date().toISOString());
+                    }
+                }catch(e){}
+            }
+            function _fmtNum(n, digits){
+                try{
+                    const x = parseFloat((''+n).replace(/,/g,''));
+                    if(isNaN(x)) return null;
+                    return x.toLocaleString(undefined, { maximumFractionDigits: digits });
+                }catch(e){ return null; }
+            }
+            function formatMoney(val, baseCurrency, opts){
+                // baseCurrency: 'USD' or 'KRW'
+                const mode = getMode();
+                const fx = getFx();
+                const base = (baseCurrency || 'USD').toUpperCase();
+                const digits = (opts && typeof opts.digits === 'number') ? opts.digits : (mode === 'KRW' ? 0 : 2);
+
+                const raw = parseFloat((''+(val ?? '')).replace(/,/g,''));
+                if(isNaN(raw)) return '-';
+
+                let out = raw;
+                if(mode !== base){
+                    if(fx.rate <= 0) return '-';
+                    out = (base === 'USD' && mode === 'KRW') ? (raw * fx.rate) : (raw / fx.rate);
+                }
+                const s = _fmtNum(out, digits);
+                if(s === null) return '-';
+                return (mode === 'KRW') ? ('₩' + s) : ('$' + s);
+            }
+
+            function syncCurrencyUi(){
+                const mode = getMode();
+                const fx = getFx();
+                const usdBtn = document.getElementById('btn-currency-usd');
+                const krwBtn = document.getElementById('btn-currency-krw');
+                const fxText = document.getElementById('currency-fx-text');
+
+                if(usdBtn && krwBtn){
+                    usdBtn.classList.toggle('btn-light', mode === 'USD');
+                    usdBtn.classList.toggle('btn-outline-light', mode !== 'USD');
+                    krwBtn.classList.toggle('btn-light', mode === 'KRW');
+                    krwBtn.classList.toggle('btn-outline-light', mode !== 'KRW');
+                }
+                if(fxText){
+                    if(fx.rate > 0){
+                        fxText.textContent = `환율: ${fx.rate.toLocaleString()}원/$ (${fx.source || '-'})`;
+                    }else{
+                        fxText.textContent = '환율: -';
+                    }
+                }
+                // 환율이 없으면 KRW 모드 강제 방지
+                if(mode === 'KRW' && fx.rate <= 0){
+                    setMode('USD');
+                    if(fxText) fxText.textContent = '환율 미확인: USD로 표시합니다.';
+                }
+            }
+
+            window.CurrencyPref = {
+                getMode,
+                setMode,
+                getFx,
+                storeFxFromBalance,
+                formatMoney,
+                syncCurrencyUi,
+            };
+
+            document.addEventListener('DOMContentLoaded', ()=>{
+                const usdBtn = document.getElementById('btn-currency-usd');
+                const krwBtn = document.getElementById('btn-currency-krw');
+                if(usdBtn) usdBtn.addEventListener('click', ()=>{
+                    setMode('USD'); syncCurrencyUi(); window.dispatchEvent(new Event('currency:changed'));
+                });
+                if(krwBtn) krwBtn.addEventListener('click', ()=>{
+                    setMode('KRW'); syncCurrencyUi(); window.dispatchEvent(new Event('currency:changed'));
+                });
+                syncCurrencyUi();
+            });
+        })();
+
         let _lastPreviewId = null;
+        let _previewPollTimer = null;
+        let _previewPollStartedAt = null;
+
+        function _stopPreviewPolling(){
+            if(_previewPollTimer){
+                clearInterval(_previewPollTimer);
+                _previewPollTimer = null;
+            }
+        }
+
+        function _startPreviewPolling(previewId){
+            _stopPreviewPolling();
+            _previewPollStartedAt = Date.now();
+            _previewPollTimer = setInterval(()=>{
+                // 최대 20분 폴링 (실시간 분석이 오래 걸릴 수 있음)
+                if(Date.now() - _previewPollStartedAt > 20 * 60 * 1000){
+                    _stopPreviewPolling();
+                    document.getElementById('preview-meta').textContent = '미리보기 타임아웃: 분석이 너무 오래 걸립니다. (20분)';
+                    return;
+                }
+
+                fetch(`/api/trade/preview/${encodeURIComponent(previewId)}`, { method: 'GET' })
+                  .then(r=>r.json())
+                  .then(resp=>{
+                    if(!resp.success){
+                      _stopPreviewPolling();
+                      document.getElementById('preview-sell-tbody').innerHTML = '<tr><td colspan="8" class="text-center text-muted">-</td></tr>';
+                      document.getElementById('preview-buy-tbody').innerHTML = '<tr><td colspan="8" class="text-center text-muted">-</td></tr>';
+                      document.getElementById('preview-meta').textContent = '미리보기 조회 실패: ' + (resp.message||'');
+                      return;
+                    }
+
+                    const status = resp.status || 'running';
+                    if(status === 'running'){
+                      document.getElementById('preview-meta').textContent =
+                        `분석 실행 중... (mode=${resp.mode}) / created_at=${resp.created_at} / expires_at=${resp.expires_at}`;
+                      return;
+                    }
+
+                    if(status === 'error'){
+                      _stopPreviewPolling();
+                      document.getElementById('preview-sell-tbody').innerHTML = '<tr><td colspan="8" class="text-center text-muted">-</td></tr>';
+                      document.getElementById('preview-buy-tbody').innerHTML = '<tr><td colspan="8" class="text-center text-muted">-</td></tr>';
+                      document.getElementById('preview-meta').textContent = '미리보기 오류: ' + (resp.error||'unknown');
+                      return;
+                    }
+
+                    function _renderPreviewView(view){
+                      const fmt = (n, digits=2)=>{
+                        try{
+                          const x = parseFloat(n);
+                          if(isNaN(x)) return '-';
+                          return x.toLocaleString(undefined, {maximumFractionDigits: digits});
+                        }catch(e){ return '-'; }
+                      };
+
+                      // 요약
+                      const a = (view && view.analysis) ? view.analysis : {};
+                      const b = (view && view.budget) ? view.budget : {};
+                      const st = (view && view.strategy) ? view.strategy : {};
+                      document.getElementById('preview-analysis-date').textContent = a.analysis_date || '-';
+                      document.getElementById('preview-total-stocks').textContent = (a.total_stocks ?? '-') || '-';
+                      document.getElementById('preview-orderable-usd').textContent = '$' + fmt(b.orderable_usd, 2);
+                      document.getElementById('preview-orderable-src').textContent = b.orderable_source ? `(${b.orderable_source})` : '';
+                      document.getElementById('preview-reserve-usd').textContent = '$' + fmt(st.reserve_cash_usd, 2);
+                      document.getElementById('preview-total-budget-usd').textContent = '$' + fmt(b.total_budget_usd, 2);
+                      document.getElementById('preview-per-stock-usd').textContent = '$' + fmt(b.per_stock_budget_usd, 2);
+
+                      // 환율 조회 실패 시: 매수 스킵(매도만 실행) 경고 배지
+                      try{
+                        const fxRate = parseFloat(b.usd_krw_rate ?? st.usd_krw_rate ?? 0);
+                        const fxSrc = (b.usd_krw_rate_source ?? st.usd_krw_rate_source ?? '');
+                        const warnEl = document.getElementById('preview-fx-warning');
+                        if(!warnEl) return;
+                        if(!fxRate || isNaN(fxRate) || fxRate <= 0){
+                          warnEl.innerHTML =
+                            `<span class="badge bg-warning text-dark me-2">매수 스킵</span>` +
+                            `<span class="text-warning">환율 자동조회 실패로 이번 실행은 <strong>매도만</strong> 진행됩니다.</span>` +
+                            (fxSrc ? ` <span class="text-muted">(fx_source=${fxSrc})</span>` : ``);
+                        }else{
+                          warnEl.innerHTML =
+                            `<span class="badge bg-secondary me-2">환율</span>` +
+                            `<span class="text-muted">${fxRate.toLocaleString()}원/달러</span>` +
+                            (fxSrc ? ` <span class="text-muted">(fx_source=${fxSrc})</span>` : ``);
+                        }
+                      }catch(e){
+                        const warnEl = document.getElementById('preview-fx-warning');
+                        if(warnEl) warnEl.innerHTML = '';
+                      }
+
+                      const sells = (view && view.sell_candidates) ? view.sell_candidates : [];
+                      const buys = (view && view.buy_candidates) ? view.buy_candidates : [];
+                      document.getElementById('preview-sell-count').textContent = (sells && sells.length) ? sells.length : 0;
+                      document.getElementById('preview-buy-count').textContent = (buys && buys.length) ? buys.length : 0;
+
+                      // Sell table
+                      const sellTbody = document.getElementById('preview-sell-tbody');
+                      sellTbody.innerHTML = '';
+                      if(!sells || sells.length === 0){
+                        sellTbody.innerHTML = '<tr><td colspan="8" class="text-center text-muted">매도 대상이 없습니다.</td></tr>';
+                      }else{
+                        sells.forEach(it=>{
+                          const pr = parseFloat(it.profit_rate ?? 0);
+                          const prClass = pr > 0 ? 'text-danger' : (pr < 0 ? 'text-primary' : 'text-white');
+                          const hd = (it.holding_days === null || it.holding_days === undefined) ? '-' : (it.holding_days + 'd');
+                          const reasons = (it.reasons || []).join(', ');
+                          sellTbody.insertAdjacentHTML('beforeend', `
+                            <tr>
+                              <td>${it.name || it.code || '-'}</td>
+                              <td>${it.code || '-'}</td>
+                              <td class="text-end">${fmt(it.qty, 4)}</td>
+                              <td class="text-end">${fmt(it.avg_price, 4)}</td>
+                              <td class="text-end">${it.current_price ? fmt(it.current_price, 4) : '-'}</td>
+                              <td class="text-end ${prClass}">${fmt(pr, 2)}%</td>
+                              <td class="text-end">${hd}</td>
+                              <td>${reasons || '-'}</td>
+                            </tr>
+                          `);
+                        });
+                      }
+
+                      // Buy table
+                      const buyTbody = document.getElementById('preview-buy-tbody');
+                      buyTbody.innerHTML = '';
+                      if(!buys || buys.length === 0){
+                        buyTbody.innerHTML = '<tr><td colspan="8" class="text-center text-muted">매수 대상이 없습니다.</td></tr>';
+                      }else{
+                        buys.forEach(it=>{
+                          buyTbody.insertAdjacentHTML('beforeend', `
+                            <tr>
+                              <td class="text-end">${it.rank ?? '-'}</td>
+                              <td>${it.name || it.code || '-'}</td>
+                              <td>${it.code || '-'}</td>
+                              <td>${it.exchange || '-'}</td>
+                              <td class="text-end">${it.current_price ? fmt(it.current_price, 4) : '-'}</td>
+                              <td class="text-end">${(it.est_qty ?? 0).toLocaleString()}</td>
+                              <td class="text-end">${it.est_amount ? ('$' + fmt(it.est_amount, 2)) : '-'}</td>
+                              <td>${it.reason || '-'}</td>
+                            </tr>
+                          `);
+                        });
+                      }
+                    }
+
+                    if(status === 'ready'){
+                      _stopPreviewPolling();
+                      if(resp.view){
+                        _renderPreviewView(resp.view);
+                      }else{
+                        // fallback: 기존 JSON 표시
+                        const a = resp.analysis || {};
+                        document.getElementById('preview-sell-tbody').innerHTML = '<tr><td colspan="8" class="text-center text-muted">-</td></tr>';
+                        document.getElementById('preview-buy-tbody').innerHTML = '<tr><td colspan="8" class="text-center text-muted">-</td></tr>';
+                        document.getElementById('preview-analysis-date').textContent = '-';
+                        document.getElementById('preview-total-stocks').textContent = '-';
+                        document.getElementById('preview-sell-count').textContent = (a.sell || []).length || 0;
+                        document.getElementById('preview-buy-count').textContent = (a.buy || []).length || 0;
+                      }
+                      document.getElementById('preview-meta').textContent =
+                        `완료 (mode=${resp.mode}) / created_at=${resp.created_at} / expires_at=${resp.expires_at}`;
+                      return;
+                    }
+                  })
+                  .catch(err=>{
+                    // 네트워크 순간 오류는 계속 폴링
+                    document.getElementById('preview-meta').textContent = '미리보기 폴링 오류(재시도): ' + err;
+                  });
+            }, 2000);
+        }
 
         function openTradePreview(){
             _lastPreviewId = null;
-            document.getElementById('preview-buy').textContent = '로딩 중...';
-            document.getElementById('preview-sell').textContent = '로딩 중...';
+            _stopPreviewPolling();
+            // 초기화
+            document.getElementById('preview-analysis-date').textContent = '-';
+            document.getElementById('preview-total-stocks').textContent = '-';
+            document.getElementById('preview-sell-count').textContent = '-';
+            document.getElementById('preview-buy-count').textContent = '-';
+            document.getElementById('preview-orderable-usd').textContent = '-';
+            document.getElementById('preview-orderable-src').textContent = '';
+            document.getElementById('preview-reserve-usd').textContent = '-';
+            document.getElementById('preview-total-budget-usd').textContent = '-';
+            document.getElementById('preview-per-stock-usd').textContent = '-';
+            document.getElementById('preview-fx-warning').innerHTML = '';
+            document.getElementById('preview-sell-tbody').innerHTML = '<tr><td colspan="8" class="text-center text-muted">분석 결과를 불러오는 중...</td></tr>';
+            document.getElementById('preview-buy-tbody').innerHTML = '<tr><td colspan="8" class="text-center text-muted">분석 결과를 불러오는 중...</td></tr>';
             document.getElementById('preview-meta').textContent = '';
 
             const modal = new bootstrap.Modal(document.getElementById('tradePreviewModal'));
@@ -157,17 +503,15 @@
               .then(r=>r.json())
               .then(resp=>{
                 if(!resp.success){
-                  document.getElementById('preview-buy').textContent = '-';
-                  document.getElementById('preview-sell').textContent = '-';
+                  document.getElementById('preview-sell-tbody').innerHTML = '<tr><td colspan="8" class="text-center text-muted">-</td></tr>';
+                  document.getElementById('preview-buy-tbody').innerHTML = '<tr><td colspan="8" class="text-center text-muted">-</td></tr>';
                   document.getElementById('preview-meta').textContent = '미리보기 실패: ' + (resp.message||'');
                   return;
                 }
                 _lastPreviewId = resp.preview_id;
-                const a = resp.analysis || {};
-                document.getElementById('preview-buy').textContent = JSON.stringify(a.buy || [], null, 2);
-                document.getElementById('preview-sell').textContent = JSON.stringify(a.sell || [], null, 2);
                 document.getElementById('preview-meta').textContent =
-                  `mode=${resp.mode} / created_at=${resp.created_at} / expires_at=${resp.expires_at}`;
+                  `분석 요청 접수됨. 결과를 불러오는 중... (mode=${resp.mode}) / created_at=${resp.created_at} / expires_at=${resp.expires_at}`;
+                _startPreviewPolling(_lastPreviewId);
               })
               .catch(err=>{
                 document.getElementById('preview-meta').textContent = '미리보기 오류: ' + err;

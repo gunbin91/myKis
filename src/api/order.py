@@ -1,5 +1,6 @@
 import requests
 import json
+import time
 from datetime import datetime
 from src.config.config_manager import config_manager
 from src.api.auth import kis_auth
@@ -118,7 +119,7 @@ class KisOrder:
             return None
 
         url = f"{url_base}/uapi/overseas-stock/v1/trading/inquire-balance"
-        
+
         # TR_ID 설정
         tr_id = "VTTS3012R" if mode == 'mock' else "TTTS3012R"
 
@@ -129,7 +130,7 @@ class KisOrder:
             "appsecret": app_secret,
             "tr_id": tr_id
         }
-        
+
         params = {
             "CANO": cano,
             "ACNT_PRDT_CD": acnt_prdt_cd,
@@ -138,22 +139,194 @@ class KisOrder:
             "CTX_AREA_FK200": "",
             "CTX_AREA_NK200": ""
         }
-        
-        try:
-            res = requests.get(url, headers=headers, params=params)
-            if res.status_code == 200:
-                data = res.json()
-                if data['rt_cd'] == '0':
-                    return data
-                else:
-                    log.error(f"[Order] 잔고 조회 실패: {data['msg1']} ({data['msg_cd']})")
+
+        # 초당 제한(EGW00201) 대응: 짧게 재시도
+        for attempt in range(3):
+            try:
+                res = requests.get(url, headers=headers, params=params)
+                if res.status_code == 200:
+                    data = res.json()
+                    if data.get('rt_cd') == '0':
+                        return data
+                    if data.get("msg_cd") == "EGW00201":
+                        time.sleep(0.3 * (attempt + 1))
+                        continue
+                    log.error(f"[Order] 잔고 조회 실패: {data.get('msg1')} ({data.get('msg_cd')})")
                     return None
-            else:
+
+                if res.status_code == 500:
+                    # 초당 제한은 500으로 내려오는 케이스가 있음
+                    try:
+                        data = res.json() or {}
+                        if data.get("msg_cd") == "EGW00201":
+                            time.sleep(0.3 * (attempt + 1))
+                            continue
+                    except Exception:
+                        pass
+
                 log.error(f"[Order] API 호출 오류: {res.status_code} - {res.text}")
                 return None
-        except Exception as e:
-            log.error(f"[Order] 잔고 조회 중 예외 발생: {e}")
+            except Exception as e:
+                if attempt < 2:
+                    time.sleep(0.3 * (attempt + 1))
+                    continue
+                log.error(f"[Order] 잔고 조회 중 예외 발생: {e}")
+                return None
+
+    def get_present_balance(
+        self,
+        natn_cd: str = "840",
+        tr_mket_cd: str = "00",
+        inqr_dvsn_cd: str = "00",
+        wcrc_frcr_dvsn_cd: str = "02",
+        mode=None,
+    ):
+        """
+        해외주식 체결기준현재잔고 조회 (v1_해외주식-008)
+        - URL: /uapi/overseas-stock/v1/trading/inquire-present-balance
+        - output3.frcr_use_psbl_amt(외화사용가능금액) 활용 가능
+        """
+        if mode is None:
+            mode = config_manager.get('common.mode', 'mock')
+        log = get_mode_logger(mode)
+
+        url_base = config_manager.get(f'{mode}.url_base')
+        app_key = config_manager.get(f'{mode}.app_key')
+        app_secret = config_manager.get(f'{mode}.app_secret')
+        cano, acnt_prdt_cd = self._get_account_info(mode)
+        token = kis_auth.get_token(mode)
+
+        if not token or not cano:
+            log.error("[Order] 토큰 또는 계좌번호가 설정되지 않았습니다.")
             return None
+
+        url = f"{url_base}/uapi/overseas-stock/v1/trading/inquire-present-balance"
+        tr_id = "VTRP6504R" if mode == "mock" else "CTRP6504R"
+
+        headers = {
+            "content-type": "application/json; charset=utf-8",
+            "authorization": token,
+            "appkey": app_key,
+            "appsecret": app_secret,
+            "tr_id": tr_id
+        }
+
+        params = {
+            "CANO": cano,
+            "ACNT_PRDT_CD": acnt_prdt_cd,
+            "WCRC_FRCR_DVSN_CD": wcrc_frcr_dvsn_cd,  # 01:원화, 02:외화
+            "NATN_CD": natn_cd,                      # 840:미국, 000:전체
+            "TR_MKET_CD": tr_mket_cd,                # 00:전체 (미국일 때 NASD/NYSE 등)
+            "INQR_DVSN_CD": inqr_dvsn_cd,            # 00:전체
+        }
+
+        # 초당 제한(EGW00201) 대응: 짧게 재시도
+        for attempt in range(3):
+            try:
+                res = requests.get(url, headers=headers, params=params)
+                if res.status_code == 200:
+                    data = res.json()
+                    if data.get('rt_cd') == '0':
+                        return data
+                    if data.get("msg_cd") == "EGW00201":
+                        time.sleep(0.3 * (attempt + 1))
+                        continue
+                    log.error(f"[Order] 체결기준현재잔고 조회 실패: {data.get('msg1')} ({data.get('msg_cd')})")
+                    return None
+
+                if res.status_code == 500:
+                    try:
+                        data = res.json() or {}
+                        if data.get("msg_cd") == "EGW00201":
+                            time.sleep(0.3 * (attempt + 1))
+                            continue
+                    except Exception:
+                        pass
+
+                log.error(f"[Order] API 호출 오류: {res.status_code} - {res.text}")
+                return None
+            except Exception as e:
+                if attempt < 2:
+                    time.sleep(0.3 * (attempt + 1))
+                    continue
+                log.error(f"[Order] 체결기준현재잔고 조회 중 예외 발생: {e}")
+                return None
+
+    def get_foreign_margin(self, mode=None):
+        """
+        해외증거금 통화별조회 (해외주식-035) - 실전 전용
+
+        - URL: /uapi/overseas-stock/v1/trading/foreign-margin
+        - output[].itgr_ord_psbl_amt: 통합주문가능금액 (통합증거금 포함 주문가능금액)
+        - output[].frcr_gnrl_ord_psbl_amt: 외화일반주문가능금액
+
+        가이드에 따르면 모의투자는 미지원.
+        """
+        if mode is None:
+            mode = config_manager.get('common.mode', 'mock')
+        log = get_mode_logger(mode)
+
+        if mode == "mock":
+            log.warning("[Order] 해외증거금 통화별조회(해외주식-035)는 모의투자를 지원하지 않습니다.")
+            return None
+
+        url_base = config_manager.get(f'{mode}.url_base')
+        app_key = config_manager.get(f'{mode}.app_key')
+        app_secret = config_manager.get(f'{mode}.app_secret')
+        cano, acnt_prdt_cd = self._get_account_info(mode)
+        token = kis_auth.get_token(mode)
+
+        if not token or not cano:
+            log.error("[Order] 토큰 또는 계좌번호가 설정되지 않았습니다.")
+            return None
+
+        url = f"{url_base}/uapi/overseas-stock/v1/trading/foreign-margin"
+        tr_id = "TTTC2101R"
+
+        headers = {
+            "content-type": "application/json; charset=utf-8",
+            "authorization": token,
+            "appkey": app_key,
+            "appsecret": app_secret,
+            "tr_id": tr_id,
+            # 가이드상 필수. 개인계좌 기준 P 사용.
+            "custtype": "P",
+        }
+        params = {
+            "CANO": cano,
+            "ACNT_PRDT_CD": acnt_prdt_cd,
+        }
+
+        for attempt in range(3):
+            try:
+                res = requests.get(url, headers=headers, params=params, timeout=5)
+                if res.status_code == 200:
+                    data = res.json()
+                    if data.get("rt_cd") == "0":
+                        return data
+                    if data.get("msg_cd") == "EGW00201":
+                        time.sleep(0.3 * (attempt + 1))
+                        continue
+                    log.error(f"[Order] 해외증거금 통화별조회 실패: {data.get('msg1')} ({data.get('msg_cd')})")
+                    return None
+
+                if res.status_code == 500:
+                    try:
+                        data = res.json() or {}
+                        if data.get("msg_cd") == "EGW00201":
+                            time.sleep(0.3 * (attempt + 1))
+                            continue
+                    except Exception:
+                        pass
+
+                log.error(f"[Order] 해외증거금 통화별조회 API 호출 오류: {res.status_code} - {res.text}")
+                return None
+            except Exception as e:
+                if attempt < 2:
+                    time.sleep(0.3 * (attempt + 1))
+                    continue
+                log.error(f"[Order] 해외증거금 통화별조회 중 예외 발생: {e}")
+                return None
 
     def get_unfilled_orders(self, exchange='NASD', mode=None):
         """
@@ -264,23 +437,37 @@ class KisOrder:
             "ORD_DVSN": order_type
         }
 
-        try:
-            log.info(f"[Order] 주문 요청: {side} {symbol} {quantity}주 @ {price} ({order_type})")
-            res = requests.post(url, headers=headers, data=json.dumps(body))
+        # 초당 제한(EGW00201) 발생 시 짧게 재시도(사용자 경험/체결 안정성 개선)
+        for attempt in range(3):
+            try:
+                log.info(f"[Order] 주문 요청: {side} {symbol} {quantity}주 @ {price} ({order_type})")
+                res = requests.post(url, headers=headers, data=json.dumps(body))
 
-            if res.status_code == 200:
-                data = res.json()
-                if data.get('rt_cd') == '0':
-                    log.info(f"[Order] 주문 성공: {data.get('msg1')} (주문번호: {data.get('output', {}).get('ODNO')})")
-                    return data.get('output')
-                log.error(f"[Order] 주문 실패: {data.get('msg1')} ({data.get('msg_cd')})")
+                if res.status_code == 200:
+                    data = res.json()
+                    if data.get('rt_cd') == '0':
+                        log.info(f"[Order] 주문 성공: {data.get('msg1')} (주문번호: {data.get('output', {}).get('ODNO')})")
+                        return data.get('output')
+                    log.error(f"[Order] 주문 실패: {data.get('msg1')} ({data.get('msg_cd')})")
+                    return None
+
+                if res.status_code == 500:
+                    try:
+                        data = res.json() or {}
+                        if data.get("msg_cd") == "EGW00201":
+                            time.sleep(0.3 * (attempt + 1))
+                            continue
+                    except Exception:
+                        pass
+
+                log.error(f"[Order] API 호출 오류: {res.status_code} - {res.text}")
                 return None
-
-            log.error(f"[Order] API 호출 오류: {res.status_code} - {res.text}")
-            return None
-        except Exception as e:
-            log.error(f"[Order] 주문 요청 중 예외 발생: {e}")
-            return None
+            except Exception as e:
+                if attempt < 2:
+                    time.sleep(0.3 * (attempt + 1))
+                    continue
+                log.error(f"[Order] 주문 요청 중 예외 발생: {e}")
+                return None
 
     def revise_cancel_order(
         self,
@@ -399,20 +586,38 @@ class KisOrder:
             "ITEM_CD": symbol,
         }
 
-        try:
-            res = requests.get(url, headers=headers, params=params)
-            if res.status_code != 200:
+        # 초당 제한(EGW00201) 대응: 짧게 재시도
+        # - 엔진에서 "2회 재시도 후 스킵" 정책을 쓰므로, 여기서도 2회까지만 재시도한다.
+        for attempt in range(2):
+            try:
+                res = requests.get(url, headers=headers, params=params)
+                if res.status_code == 200:
+                    data = res.json()
+                    if data.get("rt_cd") == "0":
+                        return data.get("output")
+                    if data.get("msg_cd") == "EGW00201":
+                        time.sleep(0.3 * (attempt + 1))
+                        continue
+                    log.error(f"[Order] 매수가능금액조회 실패: {data.get('msg1')} ({data.get('msg_cd')})")
+                    return None
+
+                if res.status_code == 500:
+                    try:
+                        data = res.json() or {}
+                        if data.get("msg_cd") == "EGW00201":
+                            time.sleep(0.3 * (attempt + 1))
+                            continue
+                    except Exception:
+                        pass
+
                 log.error(f"[Order] 매수가능금액조회 API 호출 오류: {res.status_code} - {res.text}")
                 return None
-
-            data = res.json()
-            if data.get("rt_cd") == "0":
-                return data.get("output")
-            log.error(f"[Order] 매수가능금액조회 실패: {data.get('msg1')} ({data.get('msg_cd')})")
-            return None
-        except Exception as e:
-            log.error(f"[Order] 매수가능금액조회 중 예외 발생: {e}")
-            return None
+            except Exception as e:
+                if attempt < 1:
+                    time.sleep(0.3 * (attempt + 1))
+                    continue
+                log.error(f"[Order] 매수가능금액조회 중 예외 발생: {e}")
+                return None
 
     def get_order_history(
         self,
@@ -446,6 +651,115 @@ class KisOrder:
         if not token or not cano:
             log.error("[Order] 토큰 또는 계좌번호가 설정되지 않았습니다.")
             return None
+
+        tr_id = "VTTS3035R" if mode == "mock" else "TTTS3035R"
+        url = f"{url_base}/uapi/overseas-stock/v1/trading/inquire-ccnl"
+        headers = {
+            "content-type": "application/json; charset=utf-8",
+            "authorization": token,
+            "appkey": app_key,
+            "appsecret": app_secret,
+            "tr_id": tr_id,
+        }
+
+        if mode == "mock":
+            # 가이드 제약 준수
+            pdno = ""  # 전체조회만 가능
+            sll_buy_dvsn = "00"
+            ccld_nccs_dvsn = "00"
+            ovrs_excg_cd = ""  # 전체조회만 가능
+            sort_sqn = "DS"
+        else:
+            if pdno is None:
+                pdno = "%"
+            if ovrs_excg_cd is None:
+                ovrs_excg_cd = "%"
+
+        all_rows: list[dict] = []
+        last_output2 = None
+        ctx_area_nk200 = (ctx_area_nk200 or "").strip()
+        ctx_area_fk200 = (ctx_area_fk200 or "").strip()
+
+        # 연속조회 루프
+        for _ in range(20):
+            params = {
+                "CANO": cano,
+                "ACNT_PRDT_CD": acnt_prdt_cd,
+                "PDNO": pdno,
+                "ORD_STRT_DT": start_date,
+                "ORD_END_DT": end_date,
+                "SLL_BUY_DVSN": sll_buy_dvsn,
+                "CCLD_NCCS_DVSN": ccld_nccs_dvsn,
+                "OVRS_EXCG_CD": normalize_order_exchange(ovrs_excg_cd) if ovrs_excg_cd else ovrs_excg_cd,
+                "SORT_SQN": sort_sqn,
+                "ORD_DT": "",
+                "ORD_GNO_BRNO": "",
+                "ODNO": "",
+                "CTX_AREA_NK200": ctx_area_nk200,
+                "CTX_AREA_FK200": ctx_area_fk200,
+            }
+
+            try:
+                # 초당 제한(EGW00201) 발생 시 짧게 재시도
+                data = None
+                for attempt in range(3):
+                    res = requests.get(url, headers=headers, params=params)
+                    if res.status_code == 500:
+                        # 초당 제한은 500으로 내려오는 케이스가 많음
+                        try:
+                            jd = res.json() or {}
+                            if jd.get("msg_cd") == "EGW00201":
+                                time.sleep(0.3 * (attempt + 1))
+                                continue
+                        except Exception:
+                            pass
+                        log.error(f"[Order] 주문체결내역 API 호출 오류: {res.status_code} - {res.text}")
+                        return None
+
+                    if res.status_code != 200:
+                        log.error(f"[Order] 주문체결내역 API 호출 오류: {res.status_code} - {res.text}")
+                        return None
+
+                    data = res.json()
+                    if data.get("rt_cd") == "0":
+                        break
+
+                    # vts/실전에서 초당 제한이 걸리면 재시도
+                    if data.get("msg_cd") == "EGW00201":
+                        time.sleep(0.3 * (attempt + 1))
+                        continue
+
+                    log.error(f"[Order] 주문체결내역 조회 실패: {data.get('msg1')} ({data.get('msg_cd')})")
+                    return None
+
+                if not data or data.get("rt_cd") != "0":
+                    return None
+
+                rows = data.get("output") or data.get("output1") or data.get("Output1") or []
+                rows = rows if isinstance(rows, list) else [rows]
+                all_rows.extend([r for r in rows if isinstance(r, dict)])
+
+                last_output2 = data.get("output2") or data.get("Output2") or last_output2
+                ctx_area_fk200 = (data.get("ctx_area_fk200") or "").strip()
+                ctx_area_nk200 = (data.get("ctx_area_nk200") or "").strip()
+
+                tr_cont = res.headers.get("tr_cont")  # F/M: next, D/E: last
+                if tr_cont in ("D", "E") or (not ctx_area_fk200 and not ctx_area_nk200):
+                    break
+
+                continue
+            except Exception as e:
+                log.error(f"[Order] 주문체결내역 조회 중 예외 발생: {e}")
+                return None
+
+        # 하위 호환: 기존 호출부가 'output'을 참조하는 경우가 있어 함께 제공
+        return {
+            "output": all_rows,
+            "output1": all_rows,
+            "output2": last_output2,
+            "ctx_area_fk200": ctx_area_fk200,
+            "ctx_area_nk200": ctx_area_nk200,
+        }
 
     def get_period_profit(
         self,
@@ -542,66 +856,6 @@ class KisOrder:
                 return None
 
         return {"output1": all_rows, "output2": output2}
-
-        tr_id = "VTTS3035R" if mode == "mock" else "TTTS3035R"
-        url = f"{url_base}/uapi/overseas-stock/v1/trading/inquire-ccnl"
-        headers = {
-            "content-type": "application/json; charset=utf-8",
-            "authorization": token,
-            "appkey": app_key,
-            "appsecret": app_secret,
-            "tr_id": tr_id,
-        }
-
-        if mode == "mock":
-            # 가이드 제약 준수
-            pdno = ""  # 전체조회만 가능
-            sll_buy_dvsn = "00"
-            ccld_nccs_dvsn = "00"
-            ovrs_excg_cd = ""  # 전체조회만 가능
-            sort_sqn = "DS"
-        else:
-            if pdno is None:
-                pdno = "%"
-            if ovrs_excg_cd is None:
-                ovrs_excg_cd = "%"
-
-        params = {
-            "CANO": cano,
-            "ACNT_PRDT_CD": acnt_prdt_cd,
-            "PDNO": pdno,
-            "ORD_STRT_DT": start_date,
-            "ORD_END_DT": end_date,
-            "SLL_BUY_DVSN": sll_buy_dvsn,
-            "CCLD_NCCS_DVSN": ccld_nccs_dvsn,
-            "OVRS_EXCG_CD": normalize_order_exchange(ovrs_excg_cd) if ovrs_excg_cd else ovrs_excg_cd,
-            "SORT_SQN": sort_sqn,
-            "ORD_DT": "",
-            "ORD_GNO_BRNO": "",
-            "ODNO": "",
-            "CTX_AREA_NK200": ctx_area_nk200,
-            "CTX_AREA_FK200": ctx_area_fk200,
-        }
-
-        try:
-            res = requests.get(url, headers=headers, params=params)
-            if res.status_code != 200:
-                log.error(f"[Order] 주문체결내역 API 호출 오류: {res.status_code} - {res.text}")
-                return None
-
-            data = res.json()
-            if data.get("rt_cd") == "0":
-                # 연속조회 여부는 응답 헤더에 존재
-                data["_tr_cont"] = res.headers.get("tr_cont")
-                return data
-            log.error(f"[Order] 주문체결내역 조회 실패: {data.get('msg1')} ({data.get('msg_cd')})")
-            return None
-        except Exception as e:
-            log.error(f"[Order] 주문체결내역 조회 중 예외 발생: {e}")
-            return None
-
-        # TR_ID 결정 (미국 주식 기준)
-        # (잘못 삽입된 주문 로직 블록 제거됨)
 
 kis_order = KisOrder()
 

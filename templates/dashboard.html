@@ -6,12 +6,33 @@
     <div class="col-md-3 mb-4">
         <div class="card h-100">
             <div class="card-body">
-                <h6 class="card-title text-muted mb-2">총 평가 금액</h6>
-                <h3 class="fw-bold mb-0" id="total-asset">$0.00</h3>
+                <h6 class="card-title text-muted mb-2">총자산(원화)</h6>
+                <h3 class="fw-bold mb-0" id="total-asset">₩0</h3>
+            </div>
+        </div>
+    </div>
+
+    <div class="col-md-3 mb-4">
+        <div class="card h-100">
+            <div class="card-body">
+                <h6 class="card-title text-muted mb-2"><span id="dash-fx-orderable-title">주문가능금액</span> <span class="badge bg-secondary align-middle" id="dash-fx-orderable-badge">USD</span></h6>
+                <h3 class="fw-bold mb-0" id="fx-orderable-amt">$0</h3>
+                <small class="text-muted d-block mt-1" id="dash-fx-orderable-subtitle">KIS 주문가능 외화금액 기준</small>
+            </div>
+        </div>
+    </div>
+
+    <div class="col-md-3 mb-4">
+        <div class="card h-100">
+            <div class="card-body">
+                <h6 class="card-title text-muted mb-2">평가금액(원화)</h6>
+                <h3 class="fw-bold mb-0" id="total-eval-amount">₩0</h3>
                 <div class="mt-2">
+                    <small class="text-muted me-2">평가수익률</small>
                     <span id="total-profit-rate" class="badge bg-secondary">0.00%</span>
-                    <span id="total-profit" class="text-muted ms-1">$0.00</span>
+                    <span id="total-profit" class="text-muted ms-1">₩0</span>
                 </div>
+                <small class="text-muted d-block mt-1">보유종목 평가금액 합계</small>
             </div>
         </div>
     </div>
@@ -44,14 +65,16 @@
                         <thead>
                             <tr>
                                 <th>종목명</th>
+                                <th class="text-end">보유기간</th>
                                 <th class="text-end">수량</th>
-                                <th class="text-end">현재가</th>
-                                <th class="text-end">평가손익</th>
+                                <th class="text-end">총매수금액 <span class="badge bg-secondary" id="dash-th-totalbuy-badge">USD</span></th>
+                                <th class="text-end">현재가 <span class="badge bg-secondary" id="dash-th-now-badge">USD</span></th>
+                                <th class="text-end">평가손익 <span class="badge bg-secondary" id="dash-th-pnl-badge">USD</span></th>
                                 <th class="text-end">수익률</th>
                             </tr>
                         </thead>
                         <tbody id="stock-list-body">
-                            <tr><td colspan="5" class="text-center py-4 text-muted">데이터 로딩 중...</td></tr>
+                            <tr><td colspan="7" class="text-center py-4 text-muted">데이터 로딩 중...</td></tr>
                         </tbody>
                     </table>
                 </div>
@@ -80,11 +103,53 @@
 <script>
     let currentMode = 'mock';
 
+    function updateCurrencyLabels(){
+        try{
+            const m = (window.CurrencyPref && window.CurrencyPref.getMode) ? window.CurrencyPref.getMode() : 'USD';
+            const isKrw = (m === 'KRW');
+            const unit = isKrw ? 'KRW' : 'USD';
+            const t = document.getElementById('dash-fx-orderable-title');
+            const s = document.getElementById('dash-fx-orderable-subtitle');
+            const badgeCard = document.getElementById('dash-fx-orderable-badge');
+            const b1 = document.getElementById('dash-th-totalbuy-badge');
+            const b2 = document.getElementById('dash-th-now-badge');
+            const b3 = document.getElementById('dash-th-pnl-badge');
+
+            if(t) t.textContent = '주문가능금액';
+            if(badgeCard){
+                badgeCard.textContent = unit;
+                badgeCard.classList.toggle('bg-secondary', !isKrw);
+                badgeCard.classList.toggle('bg-info', isKrw);
+                badgeCard.classList.toggle('text-dark', isKrw);
+                badgeCard.title = isKrw ? 'USD 주문가능금액을 환율로 원화 환산한 표시입니다.' : 'USD 기준 표시입니다.';
+            }
+            if(s) s.textContent = isKrw ? 'USD 주문가능금액을 환율로 원화 환산해 표시' : 'KIS 주문가능 외화금액(USD) 기준';
+
+            for(const el of [b1,b2,b3]){
+                if(!el) continue;
+                el.textContent = unit;
+                el.classList.toggle('bg-secondary', !isKrw);
+                el.classList.toggle('bg-info', isKrw);
+                el.classList.toggle('text-dark', isKrw);
+                el.title = isKrw ? 'USD 값을 환율로 원화 환산해 표시합니다.' : 'USD 기준 표시입니다.';
+            }
+        }catch(e){}
+    }
+
     function updateStatus() {
         $.get('/api/status', function(data) {
             const status = data.status;
             const balance = data.balance;
             currentMode = status.mode || 'mock';
+
+            // 통화/환율 캐시(표시용) - 다른 페이지에서도 재사용
+            try{
+                if(window.CurrencyPref){
+                    window.CurrencyPref.storeFxFromBalance(balance);
+                    window.CurrencyPref.syncCurrencyUi();
+                }
+            }catch(e){}
+            updateCurrencyLabels();
             
             // 상태 업데이트
             if (status.is_running) {
@@ -99,11 +164,13 @@
             if(status.market_open) $('#market-open-yn').addClass('text-success').removeClass('text-danger');
             else $('#market-open-yn').addClass('text-danger').removeClass('text-success');
 
-            // 자산 업데이트
-            if (balance.total_asset) {
-                $('#total-asset').text('$' + parseFloat(balance.total_asset).toLocaleString());
+            // 자산 업데이트 (v1_008 output3 기준: 원화)
+            const totalAssetKrw = balance.total_asset_krw ?? balance.total_asset;
+            if (totalAssetKrw !== undefined && totalAssetKrw !== null) {
+                $('#total-asset').text('₩' + parseFloat(totalAssetKrw).toLocaleString());
                 
-                const profitRate = parseFloat(balance.profit_rate);
+                let profitRate = parseFloat(balance.profit_rate_krw ?? balance.profit_rate);
+                if (isNaN(profitRate)) profitRate = 0.0;
                 const profitBadge = $('#total-profit-rate');
                 profitBadge.text(profitRate.toFixed(2) + '%');
                 
@@ -111,7 +178,26 @@
                 else if (profitRate < 0) profitBadge.removeClass('bg-secondary bg-danger').addClass('bg-primary'); // 파란색이 손실
                 else profitBadge.removeClass('bg-danger bg-primary').addClass('bg-secondary');
 
-                $('#total-profit').text('$' + parseFloat(balance.total_profit).toLocaleString());
+                const totalProfitKrw = balance.total_profit_krw ?? balance.total_profit;
+                $('#total-profit').text('₩' + parseFloat(totalProfitKrw).toLocaleString());
+
+                const evalAmountKrw = balance.eval_amount_krw;
+                if (evalAmountKrw !== undefined && evalAmountKrw !== null) {
+                    $('#total-eval-amount').text('₩' + parseFloat(evalAmountKrw).toLocaleString());
+                }
+
+                // 주문가능금액(USD) 표시 (v1_008 output2 우선, 없으면 외화사용가능금액으로 폴백)
+                let fxOrderable = parseFloat(balance.fx_orderable_amt ?? 0);
+                if (isNaN(fxOrderable) || fxOrderable < 0) fxOrderable = 0.0;
+                if (fxOrderable <= 0) {
+                    let fxUse = parseFloat(balance.fx_use_psbl_amt ?? 0);
+                    if (!isNaN(fxUse) && fxUse > 0) fxOrderable = fxUse;
+                }
+                if(window.CurrencyPref){
+                    $('#fx-orderable-amt').text(window.CurrencyPref.formatMoney(fxOrderable, 'USD', {digits: 2}));
+                }else{
+                    $('#fx-orderable-amt').text('$' + fxOrderable.toLocaleString());
+                }
                 
                 // 종목 리스트
                 const stocks = balance.stocks;
@@ -124,6 +210,20 @@
                         
                         const rate = parseFloat(stock.evlu_pfls_rt);
                         const rateClass = rate > 0 ? 'text-danger' : (rate < 0 ? 'text-primary' : 'text-white');
+
+                        // 총매수금액(USD) = 평단 * 수량
+                        const qtyNum = parseFloat((''+(stock.ovrs_cblc_qty ?? '')).replace(/,/g,''));
+                        const avgNum = parseFloat((''+(stock.pchs_avg_pric ?? stock.pchs_avg_pric2 ?? stock.avg_unpr3 ?? '')).replace(/,/g,''));
+                        const totalBuy = (!isNaN(qtyNum) && !isNaN(avgNum) && qtyNum > 0 && avgNum > 0) ? (qtyNum * avgNum) : null;
+
+                        const money = (v, digits=2)=>{
+                            try{
+                                if(window.CurrencyPref) return window.CurrencyPref.formatMoney(v, 'USD', {digits});
+                            }catch(e){}
+                            const x = parseFloat((''+(v ?? '')).replace(/,/g,''));
+                            if(isNaN(x)) return '-';
+                            return '$' + x.toLocaleString(undefined,{maximumFractionDigits: digits});
+                        };
                         
                         const row = `
                             <tr>
@@ -131,16 +231,18 @@
                                     <div class="fw-bold">${stock.ovrs_item_name}</div>
                                     <small class="text-muted">${stock.ovrs_pdno}</small>
                                 </td>
+                                <td class="text-end text-muted">${(stock.holding_days ?? '-')}${(stock.holding_days !== null && stock.holding_days !== undefined) ? '일' : ''}</td>
                                 <td class="text-end">${stock.ovrs_cblc_qty}</td>
-                                <td class="text-end">$${parseFloat(stock.now_pric2).toLocaleString()}</td>
-                                <td class="text-end ${rateClass}">$${parseFloat(stock.frcr_evlu_pfls_amt).toLocaleString()}</td>
+                                <td class="text-end">${totalBuy !== null ? money(totalBuy, 2) : '-'}</td>
+                                <td class="text-end">${money(stock.now_pric2, 4)}</td>
+                                <td class="text-end ${rateClass}">${money(stock.frcr_evlu_pfls_amt, 2)}</td>
                                 <td class="text-end ${rateClass}">${rate}%</td>
                             </tr>
                         `;
                         tbody.append(row);
                     });
                 } else {
-                    tbody.append('<tr><td colspan="5" class="text-center py-4 text-muted">보유 종목이 없습니다.</td></tr>');
+                    tbody.append('<tr><td colspan="7" class="text-center py-4 text-muted">보유 종목이 없습니다.</td></tr>');
                 }
             }
         });
@@ -161,11 +263,17 @@
 
     // 초기 로드 및 주기적 업데이트
     $(document).ready(function() {
+        updateCurrencyLabels();
         updateStatus();
         updateLogs();
         
         setInterval(updateStatus, 5000); // 5초마다 상태 갱신
         setInterval(updateLogs, 2000);   // 2초마다 로그 갱신
+    });
+
+    // 통화 토글 시 즉시 재렌더(단순히 상태 재조회)
+    window.addEventListener('currency:changed', ()=>{
+        try{ updateStatus(); }catch(e){}
     });
 </script>
 {% endblock %}

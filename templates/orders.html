@@ -103,8 +103,8 @@
             <th class="text-end">주문수량</th>
             <th class="text-end">체결수량</th>
             <th class="text-end">미체결</th>
-            <th class="text-end">주문가</th>
-            <th class="text-end">체결가</th>
+            <th class="text-end">주문가 <span class="badge bg-secondary" id="orders-th-ordpx-badge">USD</span></th>
+            <th class="text-end">체결가 <span class="badge bg-secondary" id="orders-th-fillpx-badge">USD</span></th>
             <th>상태</th>
             <th>주문번호</th>
           </tr>
@@ -125,9 +125,34 @@
   let lastCtxFk200 = '';
   let lastTrCont = null;
 
+  function updateCurrencyLabels(){
+    try{
+      const m = (window.CurrencyPref && window.CurrencyPref.getMode) ? window.CurrencyPref.getMode() : 'USD';
+      const isKrw = (m === 'KRW');
+      const unit = isKrw ? 'KRW' : 'USD';
+      const a = document.getElementById('orders-th-ordpx-badge');
+      const b = document.getElementById('orders-th-fillpx-badge');
+      for(const el of [a,b]){
+        if(!el) continue;
+        el.textContent = unit;
+        el.classList.toggle('bg-secondary', !isKrw);
+        el.classList.toggle('bg-info', isKrw);
+        el.classList.toggle('text-dark', isKrw);
+        el.title = isKrw ? 'USD 값을 환율로 원화 환산해 표시합니다.' : 'USD 기준 표시입니다.';
+      }
+    }catch(e){}
+  }
+
   function getMode(){
     return fetch('/api/status').then(r=>r.json()).then(st=>{
       currentMode = st.status.mode;
+      try{
+        if(window.CurrencyPref){
+          window.CurrencyPref.storeFxFromBalance(st.balance || {});
+          window.CurrencyPref.syncCurrencyUi();
+        }
+      }catch(e){}
+      updateCurrencyLabels();
       return currentMode;
     });
   }
@@ -216,6 +241,14 @@
         const canCancel = (currentMode === 'real') && (parseInt(o.nccs_qty || '0', 10) > 0);
         const cancelBtn = canCancel ? `<button class="btn btn-sm btn-outline-danger me-1" onclick="cancelOrder('${o.ovrs_excg_cd}','${o.pdno}','${o.odno}','${o.nccs_qty}')">취소</button>` : '';
         const reviseBtn = canCancel ? `<button class="btn btn-sm btn-outline-warning" onclick="openRevise('${o.ovrs_excg_cd}','${o.pdno}','${o.odno}','${o.nccs_qty}','${o.ft_ord_unpr3 || ''}')">정정</button>` : '';
+        const money = (v, digits=4)=>{
+          try{
+            if(window.CurrencyPref) return window.CurrencyPref.formatMoney(v, 'USD', {digits});
+          }catch(e){}
+          const x = parseFloat((''+(v ?? '')).replace(/,/g,''));
+          if(isNaN(x)) return '-';
+          return '$' + x.toLocaleString(undefined,{maximumFractionDigits: digits});
+        };
         tr.innerHTML = `
           <td>${o.ord_dt || ''}</td>
           <td>
@@ -226,8 +259,8 @@
           <td class="text-end">${o.ft_ord_qty || ''}</td>
           <td class="text-end">${o.ft_ccld_qty || ''}</td>
           <td class="text-end">${o.nccs_qty || ''}</td>
-          <td class="text-end">${o.ft_ord_unpr3 || ''}</td>
-          <td class="text-end">${o.ft_ccld_unpr3 || ''}</td>
+          <td class="text-end">${money(o.ft_ord_unpr3, 4)}</td>
+          <td class="text-end">${money(o.ft_ccld_unpr3, 4)}</td>
           <td>${o.prcs_stat_name || ''}</td>
           <td>
             <div>${o.odno || ''}</div>
@@ -267,6 +300,14 @@
         const tr = document.createElement('tr');
         const canCancel = (currentMode === 'real') && (parseInt(o.nccs_qty || '0', 10) > 0);
         const cancelBtn = canCancel ? `<button class="btn btn-sm btn-outline-danger" onclick="cancelOrder('${o.ovrs_excg_cd}','${o.pdno}','${o.odno}','${o.nccs_qty}')">취소</button>` : '';
+        const money = (v, digits=4)=>{
+          try{
+            if(window.CurrencyPref) return window.CurrencyPref.formatMoney(v, 'USD', {digits});
+          }catch(e){}
+          const x = parseFloat((''+(v ?? '')).replace(/,/g,''));
+          if(isNaN(x)) return '-';
+          return '$' + x.toLocaleString(undefined,{maximumFractionDigits: digits});
+        };
         tr.innerHTML = `
           <td>${o.ord_dt || ''}</td>
           <td>
@@ -277,8 +318,8 @@
           <td class="text-end">${o.ft_ord_qty || ''}</td>
           <td class="text-end">${o.ft_ccld_qty || ''}</td>
           <td class="text-end">${o.nccs_qty || ''}</td>
-          <td class="text-end">${o.ft_ord_unpr3 || ''}</td>
-          <td class="text-end">${o.ft_ccld_unpr3 || ''}</td>
+          <td class="text-end">${money(o.ft_ord_unpr3, 4)}</td>
+          <td class="text-end">${money(o.ft_ccld_unpr3, 4)}</td>
           <td>${o.prcs_stat_name || ''}</td>
           <td>
             <div>${o.odno || ''}</div>
@@ -373,7 +414,11 @@
   document.getElementById('btn-next').addEventListener('click', ()=>loadOrders(true,true));
   document.getElementById('btn-reset').addEventListener('click', ()=>{ resetFilters(); loadOrders(false,false); });
   initDefaultDates();
+  updateCurrencyLabels();
   loadOrders(false,false);
+  window.addEventListener('currency:changed', ()=>{
+    try{ updateCurrencyLabels(); loadOrders(false,false); }catch(e){}
+  });
 </script>
 
 <!-- 정정 모달 -->

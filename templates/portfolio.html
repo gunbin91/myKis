@@ -3,14 +3,14 @@
 {% block content %}
 <div class="card">
   <div class="card-header">
-    <h5 class="mb-0"><i class="fas fa-chart-pie me-2"></i>포트폴리오</h5>
+    <h5 class="mb-0"><i class="fas fa-chart-bar me-2"></i>포트폴리오</h5>
   </div>
   <div class="card-body">
     <div class="row g-3 mb-3">
       <div class="col-md-4">
         <div class="card bg-dark border-secondary">
           <div class="card-body">
-            <div class="text-muted">총자산</div>
+            <div class="text-muted">평가금액(원화)</div>
             <div class="fs-4 fw-bold" id="p-total">-</div>
           </div>
         </div>
@@ -18,7 +18,7 @@
       <div class="col-md-4">
         <div class="card bg-dark border-secondary">
           <div class="card-body">
-            <div class="text-muted">손익</div>
+            <div class="text-muted">평가손익(원화)</div>
             <div class="fs-4 fw-bold" id="p-profit">-</div>
           </div>
         </div>
@@ -26,7 +26,7 @@
       <div class="col-md-4">
         <div class="card bg-dark border-secondary">
           <div class="card-body">
-            <div class="text-muted">수익률</div>
+            <div class="text-muted">평가수익률</div>
             <div class="fs-4 fw-bold" id="p-rate">-</div>
           </div>
         </div>
@@ -44,23 +44,76 @@
           <tr>
             <th>종목</th>
             <th class="text-end">보유수량</th>
-            <th class="text-end">평단</th>
-            <th class="text-end">현재가</th>
-            <th class="text-end">평가손익</th>
+            <th class="text-end">평단 <span class="badge bg-secondary" id="p-th-avg-badge">USD</span></th>
+            <th class="text-end">총매수금액 <span class="badge bg-secondary" id="p-th-totalbuy-badge">USD</span></th>
+            <th class="text-end">현재가 <span class="badge bg-secondary" id="p-th-now-badge">USD</span></th>
+            <th class="text-end">평가손익 <span class="badge bg-secondary" id="p-th-pnl-badge">USD</span></th>
             <th class="text-end">수익률</th>
           </tr>
         </thead>
         <tbody id="p-body">
-          <tr><td colspan="6" class="text-center text-muted py-4">로딩 중...</td></tr>
+          <tr><td colspan="7" class="text-center text-muted py-4">로딩 중...</td></tr>
         </tbody>
       </table>
+    </div>
+
+    <!-- 차트는 테이블 하단에 배치 -->
+    <div class="row g-3 mt-2">
+      <div class="col-12">
+        <div class="card bg-dark border-secondary">
+          <div class="card-header border-secondary d-flex justify-content-between align-items-center">
+            <div>
+              <strong>보유비중(평가금액 기준)</strong>
+              <span class="badge bg-secondary ms-2" id="p-alloc-badge">USD</span>
+            </div>
+            <div class="small text-muted" id="p-alloc-meta">-</div>
+          </div>
+          <div class="card-body">
+            <canvas id="p-alloc-chart" height="160"></canvas>
+          </div>
+        </div>
+      </div>
     </div>
   </div>
 </div>
 {% endblock %}
 
 {% block scripts %}
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 <script>
+  let _allocChart = null;
+
+  function updateCurrencyLabels(){
+    try{
+      const m = (window.CurrencyPref && window.CurrencyPref.getMode) ? window.CurrencyPref.getMode() : 'USD';
+      const isKrw = (m === 'KRW');
+      const unit = isKrw ? 'KRW' : 'USD';
+      const allocBadge = document.getElementById('p-alloc-badge');
+      if(allocBadge){
+        allocBadge.textContent = unit;
+        allocBadge.classList.toggle('bg-secondary', !isKrw);
+        allocBadge.classList.toggle('bg-info', isKrw);
+        allocBadge.classList.toggle('text-dark', isKrw);
+        allocBadge.title = isKrw ? 'USD 값을 환율로 원화 환산한 표시입니다.' : 'USD 기준 표시입니다.';
+      }
+
+      const badges = [
+        document.getElementById('p-th-avg-badge'),
+        document.getElementById('p-th-totalbuy-badge'),
+        document.getElementById('p-th-now-badge'),
+        document.getElementById('p-th-pnl-badge'),
+      ];
+      for(const el of badges){
+        if(!el) continue;
+        el.textContent = unit;
+        el.classList.toggle('bg-secondary', !isKrw);
+        el.classList.toggle('bg-info', isKrw);
+        el.classList.toggle('text-dark', isKrw);
+        el.title = isKrw ? 'USD 값을 환율로 원화 환산해 표시합니다.' : 'USD 기준 표시입니다.';
+      }
+    }catch(e){}
+  }
+
   function fmt(n){
     if(n===undefined || n===null) return '-';
     const x = (''+n).replace(/,/g,'');
@@ -69,21 +122,199 @@
     return v.toLocaleString();
   }
 
+  function _renderAllocationChart(rows){
+    const metaEl = document.getElementById('p-alloc-meta');
+    const canvas = document.getElementById('p-alloc-chart');
+    if(!canvas){
+      return;
+    }
+
+    const pref = (window.CurrencyPref && window.CurrencyPref.getMode) ? window.CurrencyPref.getMode() : 'USD';
+    const fx = (window.CurrencyPref && window.CurrencyPref.getFx) ? window.CurrencyPref.getFx() : {rate: 0};
+    const isKrw = (pref === 'KRW');
+    const fxRate = (fx && fx.rate) ? fx.rate : 0;
+
+    const items = [];
+    for(const s of (rows || [])){
+      const sym = (s.ovrs_pdno || s.pdno || '').toString().trim();
+      const name = (s.ovrs_item_name || s.prdt_name || sym || '').toString().trim();
+      const qty = parseFloat((''+(s.hldg_qty ?? s.ovrs_cblc_qty ?? 0)).replace(/,/g,''));
+      const px = parseFloat((''+(s.now_pric2 ?? s.now_pric ?? 0)).replace(/,/g,''));
+      if(!sym || isNaN(qty) || isNaN(px) || qty <= 0 || px <= 0) continue;
+      // value는 USD 기준 평가금액
+      items.push({ label: name || sym, value_usd: qty * px });
+    }
+
+    items.sort((a,b)=>b.value_usd-a.value_usd);
+    // 너무 많은 항목/너무 굵은 막대 방지: 상위 N만 표시(+기타)
+    const topN = 8;
+    const top = items.slice(0, topN);
+    const rest = items.slice(topN);
+    const restSumUsd = rest.reduce((acc, x)=>acc + x.value_usd, 0);
+    if(restSumUsd > 0){
+      top.push({ label: '기타', value_usd: restSumUsd });
+    }
+
+    const totalUsd = top.reduce((acc, x)=>acc + x.value_usd, 0);
+    const totalDisp = (isKrw && fxRate > 0) ? (totalUsd * fxRate) : totalUsd;
+    if(metaEl){
+      const label = isKrw ? 'KRW' : 'USD';
+      const sym = isKrw ? '₩' : '$';
+      metaEl.textContent = totalDisp > 0
+        ? `총 ${label}: ${sym}${totalDisp.toLocaleString(undefined,{maximumFractionDigits: isKrw ? 0 : 2})} · 상위 ${topN}${(restSumUsd>0)?'+기타':''}`
+        : '표시할 데이터가 없습니다.';
+    }
+
+    // 키움 스타일: 평가금액 "비중(%)"을 가로 막대로 표시
+    // 긴 종목명은 줄여서 표시(툴팁엔 전체명)
+    const fullLabels = top.map(x=>x.label);
+    const labels = fullLabels.map(s=>{
+      const t = (s || '').toString();
+      return (t.length > 16) ? (t.slice(0, 16) + '…') : t;
+    });
+    const pctData = top.map(x=>{
+      const v = x.value_usd || 0;
+      return totalUsd > 0 ? (v / totalUsd * 100) : 0;
+    });
+    const dispAmounts = top.map(x=>{
+      const v = x.value_usd || 0;
+      return (isKrw && fxRate > 0) ? (v * fxRate) : v;
+    });
+
+    const colors = [
+      '#4e79a7','#f28e2b','#e15759','#76b7b2','#59a14f',
+      '#edc948','#b07aa1','#ff9da7','#9c755f','#bab0ab','#6b7280'
+    ];
+    const bg = pctData.map((_, i)=>colors[i % colors.length]);
+
+    if(_allocChart){
+      _allocChart.destroy();
+      _allocChart = null;
+    }
+
+    _allocChart = new Chart(canvas, {
+      type: 'bar',
+      data: {
+        labels,
+        datasets: [{
+          label: '보유비중(%)',
+          data: pctData,
+          backgroundColor: bg,
+          borderColor: '#2c3034',
+          borderWidth: 1,
+          // 항목 수가 적어도 막대가 과하게 두꺼워지지 않게 제한
+          maxBarThickness: 18,
+          categoryPercentage: 0.7,
+          barPercentage: 0.9,
+        }],
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        indexAxis: 'y',
+        scales: {
+          x: {
+            min: 0,
+            max: 100,
+            ticks: {
+              color: '#c9d1d9',
+              callback: (v)=> `${v}%`,
+            },
+            grid: { color: 'rgba(201,209,217,0.15)' },
+          },
+          y: {
+            ticks: { color: '#c9d1d9', font: { size: 11 } },
+            grid: { display: false },
+          }
+        },
+        plugins: {
+          legend: { display: false },
+          tooltip: {
+            callbacks: {
+              title: (items)=>{
+                // 줄임표시된 라벨 대신 전체 종목명
+                try{
+                  const idx = items && items[0] ? items[0].dataIndex : 0;
+                  return fullLabels[idx] || (items && items[0] ? items[0].label : '');
+                }catch(e){
+                  return items && items[0] ? items[0].label : '';
+                }
+              },
+              label: (ctx)=>{
+                const pct = (typeof ctx.parsed === 'number') ? ctx.parsed : (ctx.parsed?.x ?? 0);
+                const idx = ctx.dataIndex ?? 0;
+                const v = dispAmounts[idx] ?? 0;
+                const sym = isKrw ? '₩' : '$';
+                const digits = isKrw ? 0 : 2;
+                const amtText = `${sym}${Number(v).toLocaleString(undefined,{maximumFractionDigits: digits})}`;
+                return `${amtText} · ${pct.toFixed(2)}%`;
+              }
+            }
+          }
+        }
+      }
+    });
+  }
+
   function loadPortfolio(){
     fetch('/api/status').then(r=>r.json()).then(resp=>{
       const b = resp.balance || {};
-      document.getElementById('p-total').textContent = fmt(b.total_asset);
-      document.getElementById('p-profit').textContent = fmt(b.total_profit);
-      document.getElementById('p-rate').textContent = (b.profit_rate ?? '-') + '%';
+      try{
+        if(window.CurrencyPref){
+          window.CurrencyPref.storeFxFromBalance(b);
+          window.CurrencyPref.syncCurrencyUi();
+        }
+      }catch(e){}
+      updateCurrencyLabels();
+      const evalKrw = b.eval_amount_krw ?? b.total_asset_krw ?? b.total_asset;
+      const profitKrw = b.total_profit_krw ?? b.total_profit;
+      const rate = b.profit_rate_krw ?? b.profit_rate;
+
+      document.getElementById('p-total').textContent = '₩' + fmt(evalKrw);
+
+      // 요약 색상(상승=빨강, 하락=파랑)
+      const profitEl = document.getElementById('p-profit');
+      const rateEl = document.getElementById('p-rate');
+
+      const profitNum = parseFloat((''+(profitKrw ?? '')).replace(/,/g,''));
+      const rateNum = parseFloat((''+(rate ?? '')).replace(/,/g,''));
+
+      profitEl.textContent = '₩' + fmt(profitKrw);
+      profitEl.classList.remove('text-danger','text-primary','text-white');
+      if(!isNaN(profitNum) && profitNum > 0) profitEl.classList.add('text-danger');
+      else if(!isNaN(profitNum) && profitNum < 0) profitEl.classList.add('text-primary');
+      else profitEl.classList.add('text-white');
+
+      rateEl.textContent = (isNaN(rateNum) ? (rate ?? '-') : rateNum.toFixed(2)) + '%';
+      rateEl.classList.remove('text-danger','text-primary','text-white');
+      if(!isNaN(rateNum) && rateNum > 0) rateEl.classList.add('text-danger');
+      else if(!isNaN(rateNum) && rateNum < 0) rateEl.classList.add('text-primary');
+      else rateEl.classList.add('text-white');
 
       const tbody = document.getElementById('p-body');
       tbody.innerHTML = '';
       const rows = b.stocks || [];
       if(!rows || rows.length === 0){
-        tbody.innerHTML = '<tr><td colspan="6" class="text-center text-muted py-4">보유 종목이 없습니다.</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="7" class="text-center text-muted py-4">보유 종목이 없습니다.</td></tr>';
+        _renderAllocationChart([]);
         return;
       }
+      _renderAllocationChart(rows);
+
+      const money = (v, digits=2)=>{
+        try{
+          if(window.CurrencyPref) return window.CurrencyPref.formatMoney(v, 'USD', {digits});
+        }catch(e){}
+        const x = parseFloat((''+(v ?? '')).replace(/,/g,''));
+        if(isNaN(x)) return '-';
+        return '$' + x.toLocaleString(undefined,{maximumFractionDigits: digits});
+      };
       for(const s of rows){
+        const rateVal = parseFloat((''+(s.evlu_pfls_rt ?? s.evlu_pfls_rt2 ?? '')).replace(/,/g,''));
+        const rateClass = (!isNaN(rateVal) && rateVal > 0) ? 'text-danger' : ((!isNaN(rateVal) && rateVal < 0) ? 'text-primary' : 'text-white');
+        const qtyNum = parseFloat((''+(s.hldg_qty ?? s.ovrs_cblc_qty ?? 0)).replace(/,/g,''));
+        const avgNum = parseFloat((''+(s.pchs_avg_pric || s.pchs_avg_pric2 || s.avg_unpr3 || 0)).replace(/,/g,''));
+        const totalBuy = (!isNaN(qtyNum) && !isNaN(avgNum) && qtyNum > 0 && avgNum > 0) ? (qtyNum * avgNum) : null;
         const tr = document.createElement('tr');
         tr.innerHTML = `
           <td>
@@ -91,21 +322,27 @@
             <small class="text-muted">${s.ovrs_item_name || s.prdt_name || ''}</small>
           </td>
           <td class="text-end">${fmt(s.hldg_qty || s.ovrs_cblc_qty)}</td>
-          <td class="text-end">${fmt(s.pchs_avg_pric || s.pchs_avg_pric2)}</td>
-          <td class="text-end">${fmt(s.now_pric2 || s.now_pric)}</td>
-          <td class="text-end">${fmt(s.evlu_pfls_amt || s.evlu_pfls_amt2)}</td>
-          <td class="text-end">${fmt(s.evlu_pfls_rt || s.evlu_pfls_rt2)}%</td>
+          <td class="text-end">${money(s.pchs_avg_pric || s.pchs_avg_pric2, 4)}</td>
+          <td class="text-end">${totalBuy !== null ? money(totalBuy, 2) : '-'}</td>
+          <td class="text-end">${money(s.now_pric2 || s.now_pric, 4)}</td>
+          <td class="text-end ${rateClass}">${money(s.frcr_evlu_pfls_amt ?? s.evlu_pfls_amt ?? s.evlu_pfls_amt2, 2)}</td>
+          <td class="text-end ${rateClass}">${fmt(s.evlu_pfls_rt ?? s.evlu_pfls_rt2)}%</td>
         `;
         tbody.appendChild(tr);
       }
     }).catch(err=>{
       const tbody = document.getElementById('p-body');
-      tbody.innerHTML = '<tr><td colspan="6" class="text-center text-muted py-4">오류: '+err+'</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="7" class="text-center text-muted py-4">오류: '+err+'</td></tr>';
+      _renderAllocationChart([]);
     });
   }
 
   document.getElementById('p-refresh').addEventListener('click', loadPortfolio);
+  updateCurrencyLabels();
   loadPortfolio();
+  window.addEventListener('currency:changed', ()=>{
+    try{ loadPortfolio(); }catch(e){}
+  });
 </script>
 {% endblock %}
 

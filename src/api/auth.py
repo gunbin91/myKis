@@ -2,6 +2,7 @@ import time
 import requests
 import json
 from datetime import datetime, timedelta
+import threading
 from src.config.config_manager import config_manager
 from src.utils.logger import logger, get_mode_logger
 
@@ -20,6 +21,11 @@ class KisAuth:
             'mock': {'token': None, 'expired_at': None},
             'real': {'token': None, 'expired_at': None}
         }
+        # 토큰 발급은 분당 1회 제한이 있을 수 있어 동시 발급을 막는다(모드별 락).
+        self._token_locks = {
+            'mock': threading.Lock(),
+            'real': threading.Lock(),
+        }
 
     def get_token(self, mode=None):
         """
@@ -34,12 +40,16 @@ class KisAuth:
 
         # 현재 토큰 상태 확인
         current_token_info = self.access_tokens.get(mode)
-        
         if self._is_token_valid(current_token_info):
             return current_token_info['token']
-        
-        # 토큰이 없거나 만료되었으면 재발급
-        return self._issue_token(mode)
+
+        # 토큰이 없거나 만료되었으면 재발급(동시 발급 방지)
+        lock = self._token_locks.get(mode) or threading.Lock()
+        with lock:
+            current_token_info = self.access_tokens.get(mode)
+            if self._is_token_valid(current_token_info):
+                return current_token_info['token']
+            return self._issue_token(mode)
 
     def _is_token_valid(self, token_info):
         """토큰 유효성 검사 (만료 1분 전까지 유효한 것으로 간주)"""

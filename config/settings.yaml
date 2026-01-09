@@ -1,0 +1,50 @@
+common:
+  analysis_host: localhost
+  analysis_mock_enabled: false
+  analysis_port: 5500
+  analysis_url: http://localhost:5000/analysis
+  mode: real
+mock:
+  account_no_prefix: '50159286'
+  account_no_suffix: '01'
+  app_key: 
+  app_secret: 
+  auto_trading_enabled: true
+  intraday_stop_loss:
+    enabled: true
+    threshold_pct: -7.0
+  schedule_time: 01:47
+  strategy:
+    buy_order_method: limit_ask_ladder
+    limit_buy_max_levels: 5
+    limit_buy_max_premium_pct: 1
+    limit_buy_step_wait_sec: 30
+    max_hold_days: 15
+    reserve_cash_krw: 300000000
+    slippage_pct: 0.25
+    stop_loss_pct: -4
+    take_profit_pct: 5
+    top_n: 5
+  url_base: https://openapivts.koreainvestment.com:29443
+real:
+  account_no_prefix: '64587026'
+  account_no_suffix: '01'
+  app_key: 
+  app_secret: 
+  auto_trading_enabled: false
+  intraday_stop_loss:
+    enabled: true
+    threshold_pct: -7.0
+  schedule_time: 05:30
+  strategy:
+    buy_order_method: limit_ask_ladder
+    limit_buy_max_levels: 5
+    limit_buy_max_premium_pct: 1
+    limit_buy_step_wait_sec: 30
+    max_hold_days: 10
+    reserve_cash_krw: 0
+    slippage_pct: 0.5
+    stop_loss_pct: -4
+    take_profit_pct: 5
+    top_n: 5
+  url_base: https://openapi.koreainvestment.com:9443

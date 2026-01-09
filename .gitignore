@@ -23,7 +23,7 @@ Thumbs.db
 .vscode/
 
 # Secrets / local credentials (DO NOT COMMIT)
-config/settings.yaml
+# config/settings.yaml
 모의투자.txt
 실전투자.txt
 
