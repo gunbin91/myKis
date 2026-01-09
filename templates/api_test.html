@@ -1,72 +1,79 @@
 {% extends "base.html" %}
 
 {% block content %}
-<div class="card">
-  <div class="card-header">
-    <h5 class="mb-0"><i class="fas fa-flask me-2"></i>API 테스트</h5>
+<div class="container-fluid px-0">
+  <div class="d-flex justify-content-between align-items-center mb-3">
+    <div>
+      <h4 class="mb-0"><i class="fas fa-flask me-2"></i>API 테스트</h4>
+      <div class="small text-muted">한국투자증권(KIS) API를 버튼 클릭으로 빠르게 테스트합니다. (디폴트값 자동 입력)</div>
+    </div>
+    <div class="d-flex gap-2 align-items-center">
+      <span class="badge bg-info text-dark" id="api-test-server-badge">mode: -</span>
+      <button class="btn btn-sm btn-outline-light" id="btn-refresh-mode" title="상태 새로고침"><i class="fas fa-sync-alt"></i></button>
+      <button class="btn btn-sm btn-outline-secondary" id="btn-clear"><i class="fas fa-trash"></i> 초기화</button>
+    </div>
   </div>
-  <div class="card-body">
-    <div class="row g-3">
-      <div class="col-lg-4">
-        <div class="card bg-dark border-secondary">
-          <div class="card-header border-secondary">
-            <strong>시세 조회</strong>
-          </div>
-          <div class="card-body">
-            <div class="mb-2">
-              <label class="form-label">거래소(Quote)</label>
-              <select class="form-select form-select-sm" id="q-exchange">
-                <option value="NAS">NAS</option>
-                <option value="NYS">NYS</option>
-                <option value="AMS">AMS</option>
-              </select>
-            </div>
-            <div class="mb-2">
-              <label class="form-label">종목</label>
-              <input class="form-control form-control-sm" id="q-symbol" value="TSLA" />
-            </div>
-            <div class="d-flex gap-2">
-              <button class="btn btn-sm btn-outline-info" id="btn-current">현재가</button>
-              <button class="btn btn-sm btn-outline-info" id="btn-detail">상세(실전만)</button>
-            </div>
-          </div>
-        </div>
 
-        <div class="card bg-dark border-secondary mt-3">
-          <div class="card-header border-secondary">
-            <strong>계좌/주문 가능</strong>
+  <div class="row g-3">
+    <!-- Left: API 선택/파라미터 -->
+    <div class="col-lg-4">
+      <div class="card bg-dark border-secondary">
+        <div class="card-header border-secondary">
+          <strong><i class="fas fa-cog me-2"></i>API 선택</strong>
+        </div>
+        <div class="card-body">
+          <div class="mb-3">
+            <label class="form-label">API</label>
+            <select class="form-select" id="api-select"></select>
+            <div class="form-text" id="api-desc">API를 선택하면 파라미터가 표시됩니다.</div>
           </div>
-          <div class="card-body">
-            <div class="mb-2">
-              <label class="form-label">거래소(Order)</label>
-              <select class="form-select form-select-sm" id="a-exchange">
-                <option value="NASD">NASD</option>
-                <option value="NYSE">NYSE</option>
-                <option value="AMEX">AMEX</option>
-              </select>
+
+          <div class="mb-3" id="api-risk-box" style="display:none;">
+            <div class="alert alert-warning mb-2">
+              <div class="fw-bold mb-1">주의: 주문 관련 API</div>
+              <div class="small">
+                - 모의/실전 모두 주문 상태를 변경할 수 있습니다.<br/>
+                - 이 화면은 안전을 위해 <strong>이중 확인</strong>을 요구합니다.
+              </div>
             </div>
-            <div class="mb-2">
-              <label class="form-label">종목</label>
-              <input class="form-control form-control-sm" id="a-symbol" value="TSLA" />
+            <div class="form-check mb-2">
+              <input class="form-check-input" type="checkbox" id="risk-ack">
+              <label class="form-check-label" for="risk-ack">위 내용을 이해했고, 요청을 실행하는 것에 동의합니다.</label>
             </div>
-            <div class="mb-2">
-              <label class="form-label">가격(USD)</label>
-              <input class="form-control form-control-sm" id="a-price" value="200" />
-            </div>
-            <button class="btn btn-sm btn-outline-success" id="btn-buyable">매수가능금액조회</button>
+            <label class="form-label">확인 문구 입력</label>
+            <input class="form-control" id="risk-confirm-text" placeholder="동의합니다" />
+            <div class="form-text">정확히 <code>동의합니다</code> 를 입력해야 실행됩니다.</div>
+          </div>
+
+          <div id="params-container" class="mb-3"></div>
+
+          <div class="d-grid gap-2">
+            <button class="btn btn-primary" id="btn-run" disabled><i class="fas fa-play me-2"></i>실행</button>
+            <button class="btn btn-outline-secondary" id="btn-reset" disabled><i class="fas fa-undo me-2"></i>파라미터 초기화</button>
+            <button class="btn btn-outline-info" id="btn-run-suite"><i class="fas fa-bolt me-2"></i>기본 조회 전체 실행</button>
+          </div>
+
+          <div class="small text-muted mt-3">
+            - <strong>기본 조회 전체 실행</strong>은 주문/취소/정정 없이, 안전한 조회 API만 순차 호출합니다.<br/>
+            - 모의에서 미지원인 API는 <code>real_only</code>로 표시될 수 있습니다.
           </div>
         </div>
       </div>
+    </div>
 
-      <div class="col-lg-8">
-        <div class="card bg-dark border-secondary">
-          <div class="card-header border-secondary d-flex justify-content-between align-items-center">
-            <strong>응답</strong>
-            <button class="btn btn-sm btn-outline-light" id="btn-clear">Clear</button>
+    <!-- Right: 결과 -->
+    <div class="col-lg-8">
+      <div class="card bg-dark border-secondary">
+        <div class="card-header border-secondary d-flex justify-content-between align-items-center">
+          <strong><i class="fas fa-terminal me-2"></i>결과</strong>
+          <div class="d-flex gap-2">
+            <button class="btn btn-sm btn-outline-secondary" id="btn-copy"><i class="fas fa-copy"></i> 복사</button>
+            <button class="btn btn-sm btn-outline-secondary" id="btn-download"><i class="fas fa-download"></i> 다운로드</button>
           </div>
-          <div class="card-body">
-            <pre class="mb-0" style="min-height:420px; white-space:pre-wrap;" id="api-out"></pre>
-          </div>
+        </div>
+        <div class="card-body">
+          <div class="small text-muted mb-2" id="result-meta">-</div>
+          <pre class="mb-0" style="min-height:520px; max-height:65vh; overflow:auto; white-space:pre;" id="api-out">{}</pre>
         </div>
       </div>
     </div>
@@ -76,41 +83,502 @@
 
 {% block scripts %}
 <script>
-  function out(obj){
-    const el = document.getElementById('api-out');
-    el.textContent = JSON.stringify(obj, null, 2);
+  const outEl = document.getElementById('api-out');
+  const metaEl = document.getElementById('result-meta');
+
+  function _pretty(obj){
+    try{ return JSON.stringify(obj, null, 2); }catch(e){ return String(obj); }
+  }
+  function out(obj, meta){
+    outEl.textContent = _pretty(obj ?? {});
+    metaEl.textContent = meta || '-';
   }
 
-  function getMode(){
-    return fetch('/api/status').then(r=>r.json()).then(st=>st.status.mode);
+  function yyyymmdd(d){
+    const y = d.getFullYear();
+    const m = (d.getMonth()+1).toString().padStart(2,'0');
+    const day = d.getDate().toString().padStart(2,'0');
+    return `${y}${m}${day}`;
+  }
+  function getDefaultDate(daysAgo){
+    const d = new Date();
+    d.setDate(d.getDate() + (daysAgo || 0));
+    return yyyymmdd(d);
   }
 
-  document.getElementById('btn-clear').addEventListener('click', ()=>out({}));
+  async function getStatus(){
+    const st = await fetch('/api/status').then(r=>r.json());
+    return st;
+  }
+  async function getMode(){
+    const st = await getStatus();
+    return st?.status?.mode || 'mock';
+  }
+  async function refreshModeBadge(){
+    try{
+      const st = await getStatus();
+      const mode = st?.status?.mode || 'mock';
+      document.getElementById('api-test-server-badge').textContent = `mode: ${mode}`;
+      document.getElementById('api-test-server-badge').className = 'badge ' + (mode === 'real' ? 'bg-danger' : 'bg-info text-dark');
+      // 환율 캐시도 업데이트(원화/달러 토글과 같은 소스)
+      try{
+        if(window.CurrencyPref){
+          window.CurrencyPref.storeFxFromBalance(st.balance || {});
+          window.CurrencyPref.syncCurrencyUi();
+        }
+      }catch(e){}
+    }catch(e){
+      document.getElementById('api-test-server-badge').textContent = 'mode: (error)';
+    }
+  }
 
-  document.getElementById('btn-current').addEventListener('click', ()=>{
-    getMode().then(mode=>{
-      const ex = document.getElementById('q-exchange').value;
-      const sym = document.getElementById('q-symbol').value.trim();
-      return fetch(`/api/quote/current?mode=${mode}&exchange=${encodeURIComponent(ex)}&symbol=${encodeURIComponent(sym)}`);
-    }).then(r=>r.json()).then(out).catch(out);
-  });
+  const apiDefinitions = {
+    status: {
+      group: '기본',
+      name: 'status - 서버/자산 상태(/api/status)',
+      method: 'GET',
+      path: '/api/status',
+      params: [],
+      safe: true,
+      desc: '현재 모드/마켓오픈/자산요약/보유종목 등을 확인합니다.'
+    },
+    balance_006: {
+      group: '계좌',
+      name: 'v1_006 - 해외주식 잔고 RAW(/api/test/balance)',
+      method: 'GET',
+      path: '/api/test/balance',
+      safe: true,
+      desc: 'KIS v1_해외주식-006(inquire-balance) 원본 응답',
+      params: [
+        {name:'exchange', label:'거래소(Order)', type:'select', default:'NASD', options:[
+          {value:'NASD',label:'NASD'},{value:'NYSE',label:'NYSE'},{value:'AMEX',label:'AMEX'},
+          {value:'SEHK',label:'SEHK'},{value:'TKSE',label:'TKSE'},{value:'SHAA',label:'SHAA'},{value:'SZAA',label:'SZAA'},{value:'HASE',label:'HASE'},{value:'VNSE',label:'VNSE'}
+        ]},
+        {name:'currency', label:'통화', type:'select', default:'USD', options:[{value:'USD',label:'USD'}]},
+      ]
+    },
+    present_008: {
+      group: '계좌',
+      name: 'v1_008 - 체결기준현재잔고 RAW(/api/test/present-balance)',
+      method: 'GET',
+      path: '/api/test/present-balance',
+      safe: true,
+      desc: 'KIS v1_해외주식-008(inquire-present-balance) 원본 응답',
+      params: [
+        {name:'wcrc_frcr_dvsn_cd', label:'원화/외화(01/02)', type:'select', default:'02', options:[{value:'02',label:'02(외화)'},{value:'01',label:'01(원화)'}]},
+        {name:'natn_cd', label:'국가코드', type:'text', default:'000', placeholder:'000(전체) / 840(미국)'},
+        {name:'tr_mket_cd', label:'시장코드', type:'text', default:'00', placeholder:'00(전체)'},
+        {name:'inqr_dvsn_cd', label:'조회구분', type:'text', default:'00', placeholder:'00(전체)'},
+      ]
+    },
+    foreign_margin_035: {
+      group: '계좌',
+      name: '035 - 해외증거금(통합증거금) RAW(/api/test/foreign-margin) [실전]',
+      method: 'GET',
+      path: '/api/test/foreign-margin',
+      safe: true,
+      desc: 'KIS 해외주식-035 통합주문가능금액(itgr_ord_psbl_amt) 등',
+      params: []
+    },
+    quote_current_009: {
+      group: '시세',
+      name: 'v1_009 - 현재가(/api/quote/current)',
+      method: 'GET',
+      path: '/api/quote/current',
+      safe: true,
+      desc: 'KIS v1_해외주식-009 현재체결가',
+      params: [
+        {name:'exchange', label:'거래소(Quote)', type:'select', default:'NAS', options:[{value:'NAS',label:'NAS'},{value:'NYS',label:'NYS'},{value:'AMS',label:'AMS'}]},
+        {name:'symbol', label:'종목', type:'text', default:'AAPL'},
+      ]
+    },
+    quote_detail_029: {
+      group: '시세',
+      name: 'v1_029 - 현재가상세(/api/quote/detail) [실전]',
+      method: 'GET',
+      path: '/api/quote/detail',
+      safe: true,
+      desc: 'KIS v1_해외주식-029 현재가상세(모의 미지원)',
+      params: [
+        {name:'exchange', label:'거래소(Quote)', type:'select', default:'NAS', options:[{value:'NAS',label:'NAS'},{value:'NYS',label:'NYS'},{value:'AMS',label:'AMS'}]},
+        {name:'symbol', label:'종목', type:'text', default:'AAPL'},
+      ]
+    },
+    quote_asking_033: {
+      group: '시세',
+      name: '033 - 호가(/api/test/quote/asking) [실전]',
+      method: 'GET',
+      path: '/api/test/quote/asking',
+      safe: true,
+      desc: 'KIS 해외주식-033 현재가 호가(모의 미지원)',
+      params: [
+        {name:'exchange', label:'거래소(Quote)', type:'select', default:'NAS', options:[{value:'NAS',label:'NAS'},{value:'NYS',label:'NYS'},{value:'AMS',label:'AMS'}]},
+        {name:'symbol', label:'종목', type:'text', default:'AAPL'},
+      ]
+    },
+    buyable_014: {
+      group: '주문/가능',
+      name: 'v1_014 - 매수가능(/api/account/buyable)',
+      method: 'GET',
+      path: '/api/account/buyable',
+      safe: true,
+      desc: 'KIS v1_해외주식-014 매수가능금액/수량 조회',
+      params: [
+        {name:'exchange', label:'거래소(Order)', type:'select', default:'NASD', options:[
+          {value:'NASD',label:'NASD'},{value:'NYSE',label:'NYSE'},{value:'AMEX',label:'AMEX'},
+          {value:'SEHK',label:'SEHK'},{value:'TKSE',label:'TKSE'},{value:'SHAA',label:'SHAA'},{value:'SZAA',label:'SZAA'},{value:'HASE',label:'HASE'},{value:'VNSE',label:'VNSE'}
+        ]},
+        {name:'symbol', label:'종목', type:'text', default:'AAPL'},
+        {name:'price', label:'가격(USD)', type:'number', default:'200', step:'0.01'},
+      ]
+    },
+    order_history_007: {
+      group: '주문/조회',
+      name: 'v1_007 - 주문체결내역(/api/orders/history)',
+      method: 'GET',
+      path: '/api/orders/history',
+      safe: true,
+      desc: 'KIS v1_해외주식-007 주문체결내역(연속조회 지원)',
+      params: [
+        {name:'start_date', label:'시작일(YYYYMMDD)', type:'text', default: getDefaultDate(-7)},
+        {name:'end_date', label:'종료일(YYYYMMDD)', type:'text', default: getDefaultDate(0)},
+        {name:'symbol', label:'종목(선택)', type:'text', default:''},
+        {name:'exchange', label:'거래소(선택)', type:'text', default:''},
+        {name:'sll_buy_dvsn', label:'매수/매도(00/01/02)', type:'select', default:'00', options:[{value:'00',label:'전체(00)'},{value:'02',label:'매수(02)'},{value:'01',label:'매도(01)'}]},
+        {name:'ccld_nccs_dvsn', label:'체결/미체결(00/01/02)', type:'select', default:'00', options:[{value:'00',label:'전체(00)'},{value:'01',label:'체결(01)'},{value:'02',label:'미체결(02)'}]},
+      ]
+    },
+    unfilled: {
+      group: '주문/조회',
+      name: '미체결(/api/orders/unfilled)',
+      method: 'GET',
+      path: '/api/orders/unfilled',
+      safe: true,
+      desc: 'UI용 미체결 목록',
+      params: []
+    },
+    diary_period_profit: {
+      group: '매매일지',
+      name: '기간손익(요약)(/api/trading-diary/period-profit)',
+      method: 'GET',
+      path: '/api/trading-diary/period-profit',
+      safe: true,
+      desc: '실전은 v1_032 기반 집계 / 모의는 v1_007 기반 참고용',
+      params: [
+        {name:'from', label:'시작일(YYYY-MM-DD)', type:'date', default:(()=>{const d=new Date(); d.setDate(d.getDate()-30); return d.toISOString().slice(0,10);})()},
+        {name:'to', label:'종료일(YYYY-MM-DD)', type:'date', default:(new Date()).toISOString().slice(0,10)},
+        {name:'exchange', label:'거래소(실전 옵션)', type:'select', default:'', options:[{value:'',label:'전체'},{value:'NASD',label:'NASD'},{value:'SEHK',label:'SEHK'},{value:'SHAA',label:'SHAA'},{value:'TKSE',label:'TKSE'},{value:'HASE',label:'HASE'}]},
+      ]
+    },
+    period_profit_raw_032: {
+      group: '매매일지',
+      name: 'v1_032 - 기간손익 RAW(/api/test/period-profit/raw) [실전]',
+      method: 'GET',
+      path: '/api/test/period-profit/raw',
+      safe: true,
+      desc: 'KIS v1_해외주식-032 원본 응답(실전 전용)',
+      params: [
+        {name:'start_date', label:'시작일(YYYYMMDD)', type:'text', default: getDefaultDate(-30)},
+        {name:'end_date', label:'종료일(YYYYMMDD)', type:'text', default: getDefaultDate(0)},
+        {name:'exchange', label:'거래소(선택)', type:'text', default:''},
+        {name:'currency_div', label:'통화구분', type:'select', default:'01', options:[{value:'01',label:'01(외화)'},{value:'02',label:'02(원화)'}]},
+      ]
+    },
 
-  document.getElementById('btn-detail').addEventListener('click', ()=>{
-    getMode().then(mode=>{
-      const ex = document.getElementById('q-exchange').value;
-      const sym = document.getElementById('q-symbol').value.trim();
-      return fetch(`/api/quote/detail?mode=${mode}&exchange=${encodeURIComponent(ex)}&symbol=${encodeURIComponent(sym)}`);
-    }).then(r=>r.json()).then(out).catch(out);
-  });
+    // ===== 주문(위험) - 테스트 전용 엔드포인트(안전장치 포함) =====
+    order_place_mock: {
+      group: '주문(위험)',
+      name: '주문(모의 전용)(/api/test/orders/place)',
+      method: 'POST',
+      path: '/api/test/orders/place',
+      safe: false,
+      desc: 'v1_해외주식-001 주문 테스트(안전상 모의(mock)만 허용)',
+      params: [
+        {name:'exchange', label:'거래소(Order)', type:'select', default:'NASD', options:[{value:'NASD',label:'NASD'},{value:'NYSE',label:'NYSE'},{value:'AMEX',label:'AMEX'}]},
+        {name:'symbol', label:'종목', type:'text', default:'AAPL'},
+        {name:'side', label:'매수/매도', type:'select', default:'buy', options:[{value:'buy',label:'buy(매수)'},{value:'sell',label:'sell(매도)'}]},
+        {name:'order_type', label:'주문구분', type:'select', default:'00', options:[{value:'00',label:'00(지정가)'}]},
+        {name:'qty', label:'수량', type:'number', default:'1', step:'1'},
+        {name:'price', label:'가격(USD, 시장가면 0)', type:'number', default:'0', step:'0.01'},
+      ]
+    },
+    order_cancel: {
+      group: '주문(위험)',
+      name: '주문 취소(/api/test/orders/cancel)',
+      method: 'POST',
+      path: '/api/test/orders/cancel',
+      safe: false,
+      desc: 'v1_해외주식-003 정정/취소(취소)',
+      params: [
+        {name:'exchange', label:'거래소(Order)', type:'select', default:'NASD', options:[{value:'NASD',label:'NASD'},{value:'NYSE',label:'NYSE'},{value:'AMEX',label:'AMEX'}]},
+        {name:'symbol', label:'종목', type:'text', default:''},
+        {name:'origin_order_no', label:'원주문번호(ODNO)', type:'text', default:''},
+        {name:'qty', label:'취소수량', type:'number', default:'1', step:'1'},
+      ]
+    },
+    order_revise: {
+      group: '주문(위험)',
+      name: '주문 정정(/api/test/orders/revise)',
+      method: 'POST',
+      path: '/api/test/orders/revise',
+      safe: false,
+      desc: 'v1_해외주식-003 정정/취소(정정)',
+      params: [
+        {name:'exchange', label:'거래소(Order)', type:'select', default:'NASD', options:[{value:'NASD',label:'NASD'},{value:'NYSE',label:'NYSE'},{value:'AMEX',label:'AMEX'}]},
+        {name:'symbol', label:'종목', type:'text', default:''},
+        {name:'origin_order_no', label:'원주문번호(ODNO)', type:'text', default:''},
+        {name:'qty', label:'정정수량', type:'number', default:'1', step:'1'},
+        {name:'price', label:'정정가격(USD)', type:'number', default:'0', step:'0.0001'},
+      ]
+    },
+  };
 
-  document.getElementById('btn-buyable').addEventListener('click', ()=>{
-    getMode().then(mode=>{
-      const ex = document.getElementById('a-exchange').value;
-      const sym = document.getElementById('a-symbol').value.trim();
-      const price = document.getElementById('a-price').value.trim();
-      return fetch(`/api/account/buyable?mode=${mode}&exchange=${encodeURIComponent(ex)}&symbol=${encodeURIComponent(sym)}&price=${encodeURIComponent(price)}`);
-    }).then(r=>r.json()).then(out).catch(out);
+  const suiteSafeApis = ['status','present_008','balance_006','quote_current_009','order_history_007','unfilled','buyable_014','diary_period_profit'];
+
+  function _buildSelect(){
+    const sel = document.getElementById('api-select');
+    sel.innerHTML = '';
+    const groups = {};
+    for(const [k, def] of Object.entries(apiDefinitions)){
+      const g = def.group || '기타';
+      groups[g] = groups[g] || [];
+      groups[g].push({key:k, def});
+    }
+    sel.insertAdjacentHTML('beforeend', `<option value="">API를 선택하세요</option>`);
+    for(const g of Object.keys(groups)){
+      const opt = document.createElement('optgroup');
+      opt.label = g;
+      for(const it of groups[g]){
+        const o = document.createElement('option');
+        o.value = it.key;
+        o.textContent = it.def.name;
+        opt.appendChild(o);
+      }
+      sel.appendChild(opt);
+    }
+  }
+
+  function _inputHtml(p){
+    const id = `p-${p.name}`;
+    const val = (p.default ?? '').toString();
+    const required = p.required ? 'required' : '';
+    const placeholder = p.placeholder ? `placeholder="${p.placeholder}"` : '';
+    if(p.type === 'select'){
+      const opts = (p.options || []).map(o=> `<option value="${o.value}">${o.label}</option>`).join('');
+      return `
+        <div class="mb-2">
+          <label class="form-label">${p.label}</label>
+          <select class="form-select form-select-sm" id="${id}" ${required}>${opts}</select>
+        </div>
+      `;
+    }
+    if(p.type === 'date'){
+      return `
+        <div class="mb-2">
+          <label class="form-label">${p.label}</label>
+          <input class="form-control form-control-sm" type="date" id="${id}" value="${val}" ${required} ${placeholder}/>
+        </div>
+      `;
+    }
+    if(p.type === 'number'){
+      const step = p.step ? `step="${p.step}"` : '';
+      return `
+        <div class="mb-2">
+          <label class="form-label">${p.label}</label>
+          <input class="form-control form-control-sm" type="number" id="${id}" value="${val}" ${step} ${required} ${placeholder}/>
+        </div>
+      `;
+    }
+    return `
+      <div class="mb-2">
+        <label class="form-label">${p.label}</label>
+        <input class="form-control form-control-sm" id="${id}" value="${val}" ${required} ${placeholder}/>
+      </div>
+    `;
+  }
+
+  function _setParamDefaults(apiKey){
+    const def = apiDefinitions[apiKey];
+    if(!def) return;
+    for(const p of (def.params || [])){
+      const el = document.getElementById(`p-${p.name}`);
+      if(!el) continue;
+      const v = (p.default ?? '').toString();
+      el.value = v;
+      if(p.type === 'select'){
+        el.value = v;
+      }
+    }
+  }
+
+  function updateApiForm(){
+    const key = document.getElementById('api-select').value;
+    const def = apiDefinitions[key];
+    const paramsBox = document.getElementById('params-container');
+    const descEl = document.getElementById('api-desc');
+    const runBtn = document.getElementById('btn-run');
+    const resetBtn = document.getElementById('btn-reset');
+    const riskBox = document.getElementById('api-risk-box');
+
+    paramsBox.innerHTML = '';
+    if(!def){
+      descEl.textContent = 'API를 선택하면 파라미터가 표시됩니다.';
+      runBtn.disabled = true;
+      resetBtn.disabled = true;
+      riskBox.style.display = 'none';
+      return;
+    }
+
+    descEl.textContent = def.desc || '-';
+    for(const p of (def.params || [])){
+      paramsBox.insertAdjacentHTML('beforeend', _inputHtml(p));
+    }
+    // select 기본값 적용
+    for(const p of (def.params || [])){
+      if(p.type === 'select'){
+        const el = document.getElementById(`p-${p.name}`);
+        if(el) el.value = (p.default ?? '').toString();
+      }
+    }
+
+    const isRisk = (def.safe === false);
+    riskBox.style.display = isRisk ? 'block' : 'none';
+    runBtn.disabled = false;
+    resetBtn.disabled = false;
+    _syncRiskRunButton();
+  }
+
+  function _collectParams(apiKey){
+    const def = apiDefinitions[apiKey];
+    const out = {};
+    for(const p of (def.params || [])){
+      const el = document.getElementById(`p-${p.name}`);
+      if(!el) continue;
+      out[p.name] = el.value;
+    }
+    return out;
+  }
+
+  function _syncRiskRunButton(){
+    const key = document.getElementById('api-select').value;
+    const def = apiDefinitions[key];
+    const runBtn = document.getElementById('btn-run');
+    if(!def){
+      runBtn.disabled = true;
+      return;
+    }
+    if(def.safe !== false){
+      runBtn.disabled = false;
+      return;
+    }
+    const ack = document.getElementById('risk-ack')?.checked;
+    const txt = (document.getElementById('risk-confirm-text')?.value || '').trim();
+    runBtn.disabled = !(ack && txt === '동의합니다');
+  }
+
+  async function runApi(apiKey){
+    const def = apiDefinitions[apiKey];
+    if(!def) return;
+    const t0 = Date.now();
+    const mode = await getMode();
+    const params = _collectParams(apiKey);
+
+    let url = def.path;
+    let method = def.method || 'GET';
+    let body = null;
+
+    if(method === 'GET'){
+      const qs = new URLSearchParams();
+      // mode를 받는 엔드포인트들은 공통으로 mode 전달
+      qs.set('mode', mode);
+      for(const [k,v] of Object.entries(params)){
+        if(v === undefined || v === null) continue;
+        if((''+v).trim() === '') continue;
+        qs.set(k, v);
+      }
+      url = url + '?' + qs.toString();
+    }else{
+      body = { ...params, mode };
+      if(def.safe === false){
+        body.ack = document.getElementById('risk-ack')?.checked || false;
+        body.confirm_text = (document.getElementById('risk-confirm-text')?.value || '').trim();
+      }
+    }
+
+    out({request:{method, url, body}, running:true}, `요청 중... (${apiKey})`);
+    let resp;
+    try{
+      const r = await fetch(url, {
+        method,
+        headers: method === 'POST' ? {'Content-Type':'application/json'} : undefined,
+        body: method === 'POST' ? JSON.stringify(body) : undefined,
+      });
+      resp = await r.json();
+    }catch(e){
+      resp = {success:false, message:String(e)};
+    }
+    const ms = Date.now() - t0;
+    out({request:{method, url, body}, response: resp, elapsed_ms: ms}, `완료 (${apiKey}) · ${ms}ms`);
+    return resp;
+  }
+
+  async function runSuite(){
+    const results = [];
+    for(const k of suiteSafeApis){
+      try{
+        const r = await runApi(k);
+        results.push({api: k, success: !!r?.success, message: r?.message});
+        // 간단한 딜레이(초당 제한 회피)
+        await new Promise(res=>setTimeout(res, 250));
+      }catch(e){
+        results.push({api: k, success: false, message: String(e)});
+      }
+    }
+    out({suite: results}, `기본 조회 전체 실행 완료 (${results.length}개)`);
+  }
+
+  function copyResult(){
+    try{
+      navigator.clipboard.writeText(outEl.textContent || '{}');
+    }catch(e){}
+  }
+
+  function downloadResult(){
+    try{
+      const blob = new Blob([outEl.textContent || '{}'], {type:'application/json'});
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `api_test_${new Date().toISOString().replace(/[:.]/g,'-')}.json`;
+      a.click();
+      URL.revokeObjectURL(url);
+    }catch(e){}
+  }
+
+  document.getElementById('btn-clear').addEventListener('click', ()=>out({}, '-'));
+  document.getElementById('btn-copy').addEventListener('click', copyResult);
+  document.getElementById('btn-download').addEventListener('click', downloadResult);
+  document.getElementById('btn-refresh-mode').addEventListener('click', refreshModeBadge);
+  document.getElementById('btn-run-suite').addEventListener('click', runSuite);
+
+  document.getElementById('api-select').addEventListener('change', updateApiForm);
+  document.getElementById('btn-run').addEventListener('click', ()=>{
+    const k = document.getElementById('api-select').value;
+    if(!k) return;
+    runApi(k);
   });
+  document.getElementById('btn-reset').addEventListener('click', ()=>{
+    const k = document.getElementById('api-select').value;
+    if(!k) return;
+    _setParamDefaults(k);
+  });
+  document.getElementById('risk-ack').addEventListener('change', _syncRiskRunButton);
+  document.getElementById('risk-confirm-text').addEventListener('input', _syncRiskRunButton);
+
+  // init
+  _buildSelect();
+  refreshModeBadge();
+  out({}, '준비됨');
 </script>
 {% endblock %}
 

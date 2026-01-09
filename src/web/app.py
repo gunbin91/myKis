@@ -97,6 +97,216 @@ def auto_trading_page():
 def api_test_page():
     return render_template('api_test.html')
 
+
+# ===== API Test helpers (KIS 가이드/프로젝트 사용 API를 UI에서 쉽게 호출하기 위한 전용 엔드포인트) =====
+def _api_test_mode() -> str:
+    return request.args.get("mode") or (request.json.get("mode") if request.is_json and request.json else None) or config_manager.get("common.mode", "mock")
+
+
+@app.route('/api/test/balance')
+def api_test_balance():
+    """KIS v1_해외주식-006 (inquire-balance) RAW 응답"""
+    try:
+        mode = _api_test_mode()
+        exchange = request.args.get("exchange", "NASD")
+        currency = request.args.get("currency", "USD")
+        data = kis_order.get_balance(exchange=exchange, currency=currency, mode=mode)
+        return jsonify({"success": bool(data), "data": data, "mode": mode})
+    except Exception as e:
+        return jsonify({"success": False, "message": str(e)})
+
+
+@app.route('/api/test/present-balance')
+def api_test_present_balance():
+    """KIS v1_해외주식-008 (inquire-present-balance) RAW 응답"""
+    try:
+        mode = _api_test_mode()
+        natn_cd = request.args.get("natn_cd", "000")
+        tr_mket_cd = request.args.get("tr_mket_cd", "00")
+        inqr_dvsn_cd = request.args.get("inqr_dvsn_cd", "00")
+        wcrc_frcr_dvsn_cd = request.args.get("wcrc_frcr_dvsn_cd", "02")
+        data = kis_order.get_present_balance(
+            natn_cd=natn_cd,
+            tr_mket_cd=tr_mket_cd,
+            inqr_dvsn_cd=inqr_dvsn_cd,
+            wcrc_frcr_dvsn_cd=wcrc_frcr_dvsn_cd,
+            mode=mode,
+        )
+        return jsonify({"success": bool(data), "data": data, "mode": mode})
+    except Exception as e:
+        return jsonify({"success": False, "message": str(e)})
+
+
+@app.route('/api/test/foreign-margin')
+def api_test_foreign_margin():
+    """KIS 해외주식-035 (foreign-margin) RAW 응답 (실전 전용)"""
+    try:
+        mode = _api_test_mode()
+        if mode == "mock":
+            return jsonify({"success": False, "message": "real_only", "mode": mode})
+        data = kis_order.get_foreign_margin(mode=mode)
+        return jsonify({"success": bool(data), "data": data, "mode": mode})
+    except Exception as e:
+        return jsonify({"success": False, "message": str(e)})
+
+
+@app.route('/api/test/quote/asking')
+def api_test_quote_asking():
+    """KIS 해외주식-033 (현재가 호가) RAW 응답 (실전 전용)"""
+    try:
+        mode = _api_test_mode()
+        exchange = request.args.get("exchange", "NAS")
+        symbol = request.args.get("symbol")
+        if not symbol:
+            return jsonify({"success": False, "message": "missing_symbol", "mode": mode})
+        if mode == "mock":
+            return jsonify({"success": False, "message": "real_only", "mode": mode})
+        data = kis_quote.get_asking_price(exchange=exchange, symbol=symbol, mode=mode)
+        return jsonify({"success": bool(data), "data": data, "mode": mode})
+    except Exception as e:
+        return jsonify({"success": False, "message": str(e)})
+
+
+@app.route('/api/test/period-profit/raw')
+def api_test_period_profit_raw():
+    """KIS v1_해외주식-032 (기간손익) RAW 응답 (실전 전용)"""
+    try:
+        mode = _api_test_mode()
+        start_date = (request.args.get("start_date") or "").replace("-", "")
+        end_date = (request.args.get("end_date") or "").replace("-", "")
+        exchange = request.args.get("exchange") or ""
+        currency_div = request.args.get("currency_div") or "01"
+        if not (start_date and end_date) or len(start_date) != 8 or len(end_date) != 8:
+            return jsonify({"success": False, "message": "invalid_date", "mode": mode})
+        if mode == "mock":
+            return jsonify({"success": False, "message": "real_only", "mode": mode})
+        data = kis_order.get_period_profit(
+            start_date=start_date,
+            end_date=end_date,
+            exchange=exchange,
+            currency_div=currency_div,
+            mode=mode,
+        )
+        return jsonify({"success": bool(data), "data": data, "mode": mode})
+    except Exception as e:
+        return jsonify({"success": False, "message": str(e)})
+
+
+def _api_test_require_order_confirm(payload: dict, action_label: str) -> tuple[bool, str]:
+    """
+    API 테스트 페이지에서만 쓰는 주문 안전장치.
+    - 프론트 체크박스/입력값을 백엔드에서도 재검증한다.
+    """
+    ack = bool(payload.get("ack"))
+    text = (payload.get("confirm_text") or "").strip()
+    if not ack:
+        return False, f"missing_ack_for_{action_label}"
+    if text != "동의합니다":
+        return False, f"missing_confirm_text_for_{action_label}"
+    return True, ""
+
+
+@app.route('/api/test/orders/cancel', methods=['POST'])
+def api_test_orders_cancel():
+    """정정/취소 테스트(취소) - 안전장치 포함"""
+    try:
+        payload = request.json or {}
+        ok, msg = _api_test_require_order_confirm(payload, "cancel")
+        if not ok:
+            return jsonify({"success": False, "message": msg})
+
+        mode = payload.get("mode") or config_manager.get("common.mode", "mock")
+        exchange = payload.get("exchange") or "NASD"
+        symbol = payload.get("symbol") or ""
+        origin_order_no = payload.get("origin_order_no") or payload.get("origin_order_no".upper()) or ""
+        qty = int(payload.get("qty") or 0)
+        if not (symbol and origin_order_no and qty > 0):
+            return jsonify({"success": False, "message": "missing_params"})
+
+        out = kis_order.revise_cancel_order(
+            exchange=exchange,
+            symbol=symbol,
+            origin_order_no=origin_order_no,
+            qty=qty,
+            price=0.0,
+            action="cancel",
+            mode=mode,
+        )
+        return jsonify({"success": bool(out), "data": out, "mode": mode})
+    except Exception as e:
+        return jsonify({"success": False, "message": str(e)})
+
+
+@app.route('/api/test/orders/revise', methods=['POST'])
+def api_test_orders_revise():
+    """정정/취소 테스트(정정) - 안전장치 포함"""
+    try:
+        payload = request.json or {}
+        ok, msg = _api_test_require_order_confirm(payload, "revise")
+        if not ok:
+            return jsonify({"success": False, "message": msg})
+
+        mode = payload.get("mode") or config_manager.get("common.mode", "mock")
+        exchange = payload.get("exchange") or "NASD"
+        symbol = payload.get("symbol") or ""
+        origin_order_no = payload.get("origin_order_no") or ""
+        qty = int(payload.get("qty") or 0)
+        price = float(payload.get("price") or 0)
+        if not (symbol and origin_order_no and qty > 0 and price > 0):
+            return jsonify({"success": False, "message": "missing_params"})
+
+        out = kis_order.revise_cancel_order(
+            exchange=exchange,
+            symbol=symbol,
+            origin_order_no=origin_order_no,
+            qty=qty,
+            price=price,
+            action="revise",
+            mode=mode,
+        )
+        return jsonify({"success": bool(out), "data": out, "mode": mode})
+    except Exception as e:
+        return jsonify({"success": False, "message": str(e)})
+
+
+@app.route('/api/test/orders/place', methods=['POST'])
+def api_test_orders_place():
+    """
+    해외주식 주문(v1_해외주식-001) 테스트 - 안전상 모의(mock)만 허용
+    (실전 주문은 이 화면에서 지원하지 않음)
+    """
+    try:
+        payload = request.json or {}
+        ok, msg = _api_test_require_order_confirm(payload, "place")
+        if not ok:
+            return jsonify({"success": False, "message": msg})
+
+        mode = payload.get("mode") or config_manager.get("common.mode", "mock")
+        if mode != "mock":
+            return jsonify({"success": False, "message": "mock_only_for_safety", "mode": mode})
+
+        exchange = payload.get("exchange") or "NASD"
+        symbol = (payload.get("symbol") or "").strip()
+        side = (payload.get("side") or "buy").strip()
+        order_type = (payload.get("order_type") or "00").strip()
+        qty = int(payload.get("qty") or 0)
+        price = float(payload.get("price") or 0)
+        if not (symbol and qty > 0):
+            return jsonify({"success": False, "message": "missing_params"})
+
+        out = kis_order.order(
+            symbol=symbol,
+            quantity=qty,
+            price=price,
+            side=side,
+            exchange=exchange,
+            order_type=order_type,
+            mode=mode,
+        )
+        return jsonify({"success": bool(out), "data": out, "mode": mode})
+    except Exception as e:
+        return jsonify({"success": False, "message": str(e)})
+
 @app.route('/trading-diary')
 def trading_diary_page():
     return render_template('trading_diary.html')
