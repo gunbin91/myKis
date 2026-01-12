@@ -201,6 +201,82 @@
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
     <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
     <script>
+        // ===== Navbar active highlight (current page) =====
+        (function(){
+            function _normPath(p){
+                try{
+                    if(!p) return '/';
+                    // strip query/hash if accidentally included
+                    p = String(p).split('?')[0].split('#')[0];
+                    // normalize trailing slash (except root)
+                    if(p.length > 1 && p.endsWith('/')) p = p.slice(0, -1);
+                    return p || '/';
+                }catch(e){
+                    return '/';
+                }
+            }
+
+            function _hrefPath(href){
+                try{
+                    // allow absolute/relative href
+                    const u = new URL(href, window.location.origin);
+                    return _normPath(u.pathname);
+                }catch(e){
+                    return null;
+                }
+            }
+
+            function _markActiveNav(){
+                const cur = _normPath(window.location.pathname);
+                const links = Array.from(document.querySelectorAll('.navbar-nav .nav-link[href]'));
+                if(!links.length) return;
+
+                // choose best match: exact > prefix (longest)
+                let best = null;
+                let bestLen = -1;
+                for(const a of links){
+                    const p = _hrefPath(a.getAttribute('href'));
+                    if(!p) continue;
+
+                    if(cur === p){
+                        best = a; bestLen = p.length;
+                        break; // exact match is best possible
+                    }
+
+                    // root should only match root
+                    if(p === '/') continue;
+
+                    if(cur.startsWith(p)){
+                        // boundary check: "/orders" should match "/orders" or "/orders/xxx" but not "/orders2"
+                        const next = cur.charAt(p.length);
+                        const okBoundary = (next === '' || next === '/');
+                        if(okBoundary && p.length > bestLen){
+                            best = a;
+                            bestLen = p.length;
+                        }
+                    }
+                }
+
+                // clear old states
+                for(const a of links){
+                    a.classList.remove('active');
+                    a.removeAttribute('aria-current');
+                }
+
+                // special-case root dashboard
+                if(!best && cur === '/'){
+                    best = links.find(x => _hrefPath(x.getAttribute('href')) === '/') || null;
+                }
+
+                if(best){
+                    best.classList.add('active');
+                    best.setAttribute('aria-current', 'page');
+                }
+            }
+
+            document.addEventListener('DOMContentLoaded', _markActiveNav);
+        })();
+
         // ===== Currency preference (USD/KRW) =====
         (function(){
             const KEY_MODE = 'currency_mode';

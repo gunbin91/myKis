@@ -222,6 +222,11 @@
       const mode = d.status.mode;
       return fetch('/api/auto-trading/strategy?mode='+mode).then(r=>r.json()).then(s=>{
         if(!s.success) return;
+        // UI 동기화: 현재 설정값(auto_trading_enabled)을 스위치에 반영
+        // (주기적으로 갱신되는 loadStatus()에서 체크박스를 건드리면 사용자의 "저장 전 변경"이 덮일 수 있어,
+        //  초기 로드(loadStrategy)에서만 반영한다.)
+        const autoEl = document.getElementById('auto-enabled');
+        if(autoEl) autoEl.checked = !!s.auto_trading_enabled;
         document.getElementById('analysis-mock-enabled').checked = !!s.common.analysis_mock_enabled;
         document.getElementById('analysis-host').value = s.common.analysis_host || 'localhost';
         document.getElementById('analysis-port').value = s.common.analysis_port || 5000;

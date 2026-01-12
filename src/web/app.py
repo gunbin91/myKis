@@ -1003,6 +1003,7 @@ def api_auto_trading_get_strategy():
     """자동매매 전략/분석서버 설정 조회 (보안상 계정/API 키는 제외)"""
     try:
         mode = request.args.get("mode") or config_manager.get("common.mode", "mock")
+        enabled = bool(config_manager.get(f"{mode}.auto_trading_enabled", False))
         strategy = config_manager.get(f"{mode}.strategy", {}) or {}
         # autokiwoomstock 스타일: 투자금액 입력 없음. (기존 max_buy_amount/investment_amount는 무시)
         if isinstance(strategy, dict):
@@ -1043,7 +1044,15 @@ def api_auto_trading_get_strategy():
             "analysis_host": config_manager.get("common.analysis_host", "localhost"),
             "analysis_port": int(config_manager.get("common.analysis_port", 5500) or 5500),
         }
-        return jsonify({"success": True, "mode": mode, "strategy": strategy, "common": common, "intraday_stop_loss": intraday, "schedule": schedule})
+        return jsonify({
+            "success": True,
+            "mode": mode,
+            "auto_trading_enabled": enabled,
+            "strategy": strategy,
+            "common": common,
+            "intraday_stop_loss": intraday,
+            "schedule": schedule
+        })
     except Exception as e:
         return jsonify({"success": False, "message": str(e)})
 
