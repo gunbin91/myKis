@@ -1,5 +1,4 @@
 from flask import Flask, render_template, jsonify, request, redirect
-from apscheduler.schedulers.background import BackgroundScheduler
 import threading
 import os
 import glob
@@ -8,6 +7,8 @@ from pathlib import Path
 from datetime import datetime, timedelta
 from uuid import uuid4
 from src.engine.engine import trading_engine
+from src.engine.multi_process_scheduler import multi_process_scheduler
+from src.engine.scheduler_state_store import SchedulerStateStore
 from src.config.config_manager import config_manager
 from src.api.order import kis_order
 from src.api.quote import kis_quote
@@ -25,47 +26,69 @@ app = Flask(
     static_folder=str(STATIC_DIR),
 )
 
-# 스케줄러 설정
-scheduler = BackgroundScheduler()
+# 멀티프로세스 스케줄러(모의/실전 동시 실행)
 _scheduler_started = False
 _scheduler_lock = threading.Lock()
 
 def start_scheduler():
     """
     스케줄러 시작은 import 시점이 아니라 '서버 실행 시점'에만 수행.
-    - myKiwoom-main처럼 reloader/다중 import 환경에서 중복 시작 위험을 낮춤
+    - 모의/실전은 서로 간섭 없이 동시 실행(키움 샘플과 동일한 운영 패턴)
+    - 멀티프로세스이므로 웹 접속 여부와 무관하게 서버 프로세스가 살아있으면 돌아간다.
     """
     global _scheduler_started
     with _scheduler_lock:
         if _scheduler_started:
             return
 
-        # 1분마다 자동매매 엔진 실행 (중복 실행/밀림 방지 옵션 포함)
-        scheduler.add_job(
-            func=trading_engine.run,
-            trigger="interval",
-            seconds=60,
-            id="auto_trading",
-            replace_existing=True,
-            max_instances=1,
-            coalesce=True,
-            misfire_grace_time=30,
-        )
-        # 1분마다 장중 손절 감시
-        scheduler.add_job(
-            func=trading_engine.stop_loss_watch,
-            trigger="interval",
-            seconds=60,
-            id="stop_loss_watch",
-            replace_existing=True,
-            max_instances=1,
-            coalesce=True,
-            misfire_grace_time=30,
-        )
-
-        if not scheduler.running:
-            scheduler.start()
+        multi_process_scheduler.start()
         _scheduler_started = True
+
+
+@app.route("/api/scheduler/<action>", methods=["POST"])
+def api_scheduler_control(action: str):
+    """
+    스케줄러 운영 제어 (키움 샘플 수준의 운영 편의)
+    - action: start|stop|restart
+    - body: {"mode":"mock"|"real"|"all"}
+    """
+    try:
+        payload = request.json or {}
+        mode = (payload.get("mode") or "all").strip().lower()
+        action = (action or "").strip().lower()
+        if action not in ("start", "stop", "restart"):
+            return jsonify({"success": False, "message": "invalid_action"})
+        if mode not in ("mock", "real", "all"):
+            return jsonify({"success": False, "message": "invalid_mode"})
+
+        if action == "start":
+            if mode == "all":
+                multi_process_scheduler.start()
+            elif mode == "mock":
+                multi_process_scheduler.mock.start()
+            else:
+                multi_process_scheduler.real.start()
+        elif action == "stop":
+            if mode == "all":
+                multi_process_scheduler.stop()
+            elif mode == "mock":
+                multi_process_scheduler.mock.stop()
+            else:
+                multi_process_scheduler.real.stop()
+        else:  # restart
+            if mode == "all":
+                multi_process_scheduler.stop()
+                multi_process_scheduler.start()
+            elif mode == "mock":
+                multi_process_scheduler.mock.stop()
+                multi_process_scheduler.mock.start()
+            else:
+                multi_process_scheduler.real.stop()
+                multi_process_scheduler.real.start()
+
+        return jsonify({"success": True})
+    except Exception as e:
+        return jsonify({"success": False, "message": str(e)})
 
 # 즉시 실행 미리보기(서버 메모리 임시 저장)
 _TRADE_PREVIEWS: dict[str, dict] = {}
@@ -362,34 +385,52 @@ def settings_page():
 @app.route('/api/status')
 def get_status():
     """현재 상태 및 잔고 조회 (AJAX)"""
-    # 간단한 상태 정보
-    job_watch = scheduler.get_job("stop_loss_watch") if scheduler else None
-    next_run_watch = None
-    try:
-        if job_watch and job_watch.next_run_time:
-            next_run_watch = job_watch.next_run_time.isoformat()
-    except Exception:
-        next_run_watch = None
+    # 멀티프로세스 스케줄러 상태(모드별 하트비트 파일) 기반으로 표시
+    def _read_scheduler(mode: str) -> dict:
+        try:
+            return SchedulerStateStore(mode=mode).read() or {}
+        except Exception:
+            return {}
 
-    # 자동매매 "실제 다음 실행 시각"(schedule_time 기준)
-    next_run = None
-    try:
-        mode = config_manager.get("common.mode", "mock")
-        dt = trading_engine.get_next_scheduled_run_at(mode=mode)
-        next_run = dt.isoformat() if dt else None
-    except Exception:
-        next_run = None
+    sch_mock = _read_scheduler("mock")
+    sch_real = _read_scheduler("real")
+
+    def _as_iso(v):
+        try:
+            return str(v) if v else None
+        except Exception:
+            return None
+
+    # 모드별 다음 실행시각(UI용, 스케줄러 프로세스의 loop 지연과 무관한 "논리적 다음 실행")
+    def _next_run_for(m: str):
+        try:
+            dt = trading_engine.get_next_scheduled_run_at(mode=m)
+            return dt.isoformat() if dt else None
+        except Exception:
+            return None
+
+    next_run_mock = _next_run_for("mock")
+    next_run_real = _next_run_for("real")
+
+    # 현재 모드의 엔진 상태는 '해당 모드 스케줄러 프로세스'가 기록한 값으로 제공
+    mode = config_manager.get("common.mode", "mock")
+    sch_cur = sch_mock if mode == "mock" else sch_real
 
     status = {
         "market_open": trading_engine.is_market_open(),
-        "is_running": trading_engine.is_running,
-        "mode": config_manager.get("common.mode", "mock"),
-        "engine_last_run_at": trading_engine.last_run_at.isoformat() if trading_engine.last_run_at else None,
-        "engine_last_error": trading_engine.last_error,
-        "engine_next_run_at": next_run,
-        "stop_watch_last_run_at": trading_engine.last_stop_watch_at.isoformat() if trading_engine.last_stop_watch_at else None,
-        "stop_watch_last_error": trading_engine.last_stop_watch_error,
-        "stop_watch_next_run_at": next_run_watch,
+        "is_running": bool(sch_cur.get("is_executing", False)),
+        "mode": mode,
+        "engine_last_run_at": _as_iso(sch_cur.get("engine_last_run_at")),
+        "engine_last_error": sch_cur.get("engine_last_error"),
+        "engine_next_run_at": next_run_mock if mode == "mock" else next_run_real,
+        "stop_watch_last_run_at": _as_iso(sch_cur.get("stop_watch_last_run_at")),
+        "stop_watch_last_error": sch_cur.get("stop_watch_last_error"),
+        "stop_watch_next_run_at": None,
+        # 확장: 모드별 스케줄러 상태(디버깅/운영 확인용)
+        "schedulers": {
+            "mock": {**sch_mock, "engine_next_run_at": next_run_mock},
+            "real": {**sch_real, "engine_next_run_at": next_run_real},
+        },
     }
     
     # 잔고 조회 (실시간성을 위해 API 호출)
@@ -963,10 +1004,9 @@ def update_settings():
     """설정 업데이트"""
     try:
         new_config = request.json
-        # YAML 파일 저장
-        config_path = config_manager.CONFIG_FILE
-        with open(config_path, 'w', encoding='utf-8') as f:
-            yaml.dump(new_config, f, allow_unicode=True, default_flow_style=False)
+        # YAML 파일 저장(원자적 교체)
+        config_manager._config = new_config
+        config_manager.save_config()
         
         # 메모리 로드
         config_manager.load_config()
@@ -990,9 +1030,7 @@ def api_auto_trading_set_config():
         config_manager._config.setdefault(mode, {})
         config_manager._config[mode]["auto_trading_enabled"] = enabled
 
-        config_path = config_manager.CONFIG_FILE
-        with open(config_path, 'w', encoding='utf-8') as f:
-            yaml.dump(config_manager._config, f, allow_unicode=True, default_flow_style=False)
+        config_manager.save_config()
         config_manager.load_config()
         return jsonify({"success": True})
     except Exception as e:
@@ -1125,9 +1163,7 @@ def api_auto_trading_set_strategy():
             config_manager._config[mode]["schedule_time"] = str(schedule_in.get("schedule_time")).strip()
 
         # 저장
-        config_path = config_manager.CONFIG_FILE
-        with open(config_path, 'w', encoding='utf-8') as f:
-            yaml.dump(config_manager._config, f, allow_unicode=True, default_flow_style=False)
+        config_manager.save_config()
         config_manager.load_config()
         return jsonify({"success": True})
     except Exception as e:
@@ -1143,9 +1179,7 @@ def api_server_select():
             return jsonify({"success": False, "message": "invalid server_type"})
 
         config_manager._config["common"]["mode"] = server_type
-        config_path = config_manager.CONFIG_FILE
-        with open(config_path, 'w', encoding='utf-8') as f:
-            yaml.dump(config_manager._config, f, allow_unicode=True, default_flow_style=False)
+        config_manager.save_config()
         config_manager.load_config()
         return jsonify({"success": True, "message": "ok"})
     except Exception as e:
@@ -1165,9 +1199,7 @@ def change_mode():
         config_manager._config['common']['mode'] = new_mode
         
         # YAML 파일 저장
-        config_path = config_manager.CONFIG_FILE
-        with open(config_path, 'w', encoding='utf-8') as f:
-            yaml.dump(config_manager._config, f, allow_unicode=True, default_flow_style=False)
+        config_manager.save_config()
             
         return jsonify({"result": "success", "mode": new_mode})
         

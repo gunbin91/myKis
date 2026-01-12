@@ -1,6 +1,7 @@
 import os
 import yaml
 from src.utils.logger import logger
+from pathlib import Path
 
 class ConfigManager:
     _instance = None
@@ -156,6 +157,25 @@ class ConfigManager:
         except Exception as e:
             logger.error(f"[Config] 설정 로드 실패: {e}")
             self._config = {}
+
+    def save_config(self, config: dict | None = None) -> None:
+        """
+        설정 파일 저장(원자적 교체).
+
+        멀티프로세스 환경에서 reader(스케줄러)와 writer(웹 저장)가 동시에 접근해도
+        중간 상태(깨진 YAML)를 읽지 않도록 tmp 파일로 쓴 뒤 replace 한다.
+        """
+        data = config if config is not None else (self._config or {})
+        try:
+            path = Path(self.CONFIG_FILE)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix(path.suffix + ".tmp")
+            with open(tmp, "w", encoding="utf-8") as f:
+                yaml.dump(data, f, allow_unicode=True, default_flow_style=False)
+            tmp.replace(path)  # Windows 포함 원자적 교체
+        except Exception as e:
+            logger.error(f"[Config] 설정 저장 실패: {e}")
+            raise
 
     def get(self, key, default=None):
         """설정값 조회 (key1.key2 형식 지원)"""

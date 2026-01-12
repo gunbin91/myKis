@@ -3,6 +3,7 @@ import os
 import socket
 import webbrowser
 from threading import Timer
+import multiprocessing
 
 # 프로젝트 루트 경로를 sys.path에 추가
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -25,6 +26,7 @@ def open_browser(port):
 
 if __name__ == "__main__":
     try:
+        multiprocessing.freeze_support()
         # 가용 포트 탐색
         port = find_available_port()
         logger.info(f"=== myKis 시스템 시작 (Port: {port}) ===")

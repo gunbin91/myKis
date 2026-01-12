@@ -416,8 +416,18 @@ class TradingEngine:
             except Exception:
                 hh, mm = 0, 0
 
-            if not (now.hour == hh and now.minute == mm):
-                return
+            # 1분 주기 체크는 프로세스/네트워크 상황에 따라 약간 지연될 수 있어
+            # 지정 시각 ±1분 범위를 허용한다(키움 샘플과 동일한 안정성 의도).
+            try:
+                target = now.replace(hour=hh, minute=mm, second=0, microsecond=0)
+                start = target - timedelta(minutes=1)
+                end = target + timedelta(minutes=1)
+                if not (start <= now <= end):
+                    return
+            except Exception:
+                # 파싱/계산 실패 시 기존 보수적 동작 유지(정확히 같은 분에만 실행)
+                if not (now.hour == hh and now.minute == mm):
+                    return
 
             today = now.strftime("%Y%m%d")
             # 서버 재시작에도 중복 실행 방지: 파일 기반 상태 우선
@@ -902,16 +912,16 @@ class TradingEngine:
                                 asks.append(p)
                         return asks
 
-                    def _buy_with_ask_ladder() -> bool:
+                    def _buy_with_ask_ladder() -> tuple[bool, str]:
                         # 1) 호가 조회
                         ob = kis_quote.get_asking_price(exchange, symbol, mode=mode)
                         if not ob:
                             log.warning(f"[Engine] {symbol} 호가 조회 실패 → 슬리피지 지정가로 폴백")
-                            return False
+                            return False, "ask_api_failed"
                         asks = _extract_asks(ob)
                         if not asks:
                             log.warning(f"[Engine] {symbol} 호가 데이터 없음 → 슬리피지 지정가로 폴백")
-                            return False
+                            return False, "asks_empty"
 
                         max_price = current_price * (1.0 + (limit_buy_max_premium_pct / 100.0)) if current_price > 0 else 0.0
                         remaining = int(qty)
@@ -924,7 +934,7 @@ class TradingEngine:
                                     f"[Engine] 매수 가드 발동: {symbol} 매도{level_idx+1}호가 {ask_price:.4f} > max {max_price:.4f} "
                                     f"(허용 +{limit_buy_max_premium_pct:.2f}%) → 매수 스킵"
                                 )
-                                return False
+                                return False, "guard_triggered"
 
                             # 가격이 바뀌면 매수가능수량도 바뀔 수 있어 재조회
                             ps2 = kis_order.get_buyable_amount(exchange=exchange, symbol=symbol, price=ask_price, mode=mode)
@@ -948,14 +958,15 @@ class TradingEngine:
                             odno = (out or {}).get("ODNO") or (out or {}).get("odno")
                             if not odno:
                                 log.warning(f"[Engine] {symbol} 매수 주문 실패(주문번호 없음)")
-                                return False
+                                # 안전상 추가 주문을 진행하지 않는다(중복/과매수 방지).
+                                return False, "order_no_missing"
 
                             # 짧게 대기 후 미체결 잔량 확인
                             time_module.sleep(max(0.2, limit_buy_step_wait_sec))
                             unfilled_qty = _find_unfilled_qty_by_odno(odno)
                             if unfilled_qty <= 0:
                                 log.info(f"[Engine] {symbol} 매수 체결(또는 미체결 목록에서 제거됨): odno={odno}")
-                                return True
+                                return True, "filled_or_removed"
 
                             # 잔량 취소 후 다음 호가로 재시도(중복 미체결 방지)
                             log.info(f"[Engine] {symbol} 미체결 잔량 {unfilled_qty}주 → 취소 후 다음 호가로 재시도 (odno={odno})")
@@ -970,7 +981,8 @@ class TradingEngine:
                             )
                             if not cncl:
                                 log.warning(f"[Engine] {symbol} 잔량 취소 실패 → 중복 주문 방지 위해 재시도 중단 (odno={odno})")
-                                return False
+                                # 취소 실패 시 중복 주문 위험이 크므로 폴백 포함 추가 주문 금지
+                                return False, "cancel_failed"
 
                             remaining = int(unfilled_qty)
                             # 다음 단계로 넘어가기 전 과도한 호출 방지
@@ -978,16 +990,21 @@ class TradingEngine:
 
                         # 여기까지 왔으면 최대 레벨까지 시도했으나 잔량이 남은 케이스
                         log.warning(f"[Engine] {symbol} 지정가 호가 상향 시도 후에도 미체결 잔량이 남아 매수 완료 실패(remaining={remaining})")
-                        return False
+                        # 부분체결 가능성이 있으므로 폴백 포함 추가 주문 금지
+                        return False, "unfilled_remaining"
 
                     if qty > 0:
                         if mode == "real" and buy_order_method == "limit_ask_ladder":
-                            ok = _buy_with_ask_ladder()
-                            if not ok:
-                                # 실전에서 호가/취소 API 문제로 ladder가 불가능하면 기존 방식으로 1회 폴백(지정가)
+                            ok, reason = _buy_with_ask_ladder()
+                            if (not ok) and (reason in ("ask_api_failed", "asks_empty")):
+                                # 실전에서 "호가 조회 자체"가 불가한 환경이면 ladder를 시작할 수 없다.
+                                # 이 경우에만(=ladder 주문을 넣기 전) 기존 방식으로 1회 폴백한다.
                                 buy_price = current_price * (1.0 + (slippage_pct / 100.0))
-                                log.info(f"[Engine] ladder 실패 → 슬리피지 지정가 1회 폴백: {symbol} {qty}주 (@{buy_price})")
+                                log.info(f"[Engine] ladder 불가({reason}) → 슬리피지 지정가 1회 폴백: {symbol} {qty}주 (@{buy_price})")
                                 kis_order.order(symbol, qty, buy_price, 'buy', exchange=exchange, order_type='00', mode=mode)
+                            elif not ok:
+                                # 가드 발동/부분체결/취소 실패 등 "중복/과매수 위험" 케이스에서는 추가 주문을 금지한다.
+                                log.warning(f"[Engine] ladder 실패({reason}) → 안전상 추가 폴백 주문을 생략합니다.")
                         else:
                             buy_price = current_price * (1.0 + (slippage_pct / 100.0))
                             log.info(f"[Engine] 매수 주문 실행: {symbol}({exchange}) {qty}주 (@{buy_price})")
