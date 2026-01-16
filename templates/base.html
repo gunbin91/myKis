@@ -95,6 +95,21 @@
         </div>
     </nav>
 
+    <!-- 모의투자(mock) 공통 안내 배너 (전 페이지 공통 노출) -->
+    <div class="container-fluid px-4" id="mock-global-banner-wrap" style="display:none;">
+        <div class="alert alert-warning border-secondary d-flex justify-content-between align-items-start mb-3 py-2" role="alert" id="mock-global-banner">
+            <div class="small">
+                <div class="fw-bold mb-1">모의투자 안내 (일부 KIS API 미지원/제약)</div>
+                <div class="text-muted">
+                    - 호가(해외주식-033), 미체결(해외주식-005) 미지원 → 자동매매의 <strong>호가단계 매수는 슬리피지로 대체</strong>, 미체결은 <strong>체결내역(007) 기반 근사</strong><br/>
+                    - 통합증거금/주문가능금액(해외주식-035) 미지원 → 대시보드 주문가능금액이 <strong>현금성(총자산-평가금액) 기준 추정</strong>으로 표시될 수 있음<br/>
+                    - 기간손익(해외주식-032) 미지원 → 매매일지는 <strong>참고용 집계</strong>로 표시
+                </div>
+            </div>
+            <button type="button" class="btn-close" aria-label="Close" id="btn-mock-banner-close"></button>
+        </div>
+    </div>
+
     <div class="container-fluid px-4">
         {% block content %}{% endblock %}
     </div>
@@ -386,12 +401,31 @@
         let _lastPreviewId = null;
         let _previewPollTimer = null;
         let _previewPollStartedAt = null;
+        let _tradePreviewConfirmOnce = false;
 
         function _stopPreviewPolling(){
             if(_previewPollTimer){
                 clearInterval(_previewPollTimer);
                 _previewPollTimer = null;
             }
+        }
+
+        function _setExecuteButtonState(enabled, label){
+            try{
+                const btn = document.getElementById('btn-preview-execute');
+                if(!btn) return;
+                btn.disabled = !enabled;
+                // spinner + label (사용자 친화)
+                if(label){
+                    btn.innerHTML = enabled
+                      ? `<i class="fas fa-check me-1"></i>${label}`
+                      : `<span class="spinner-border spinner-border-sm me-2" role="status" aria-hidden="true"></span>${label}`;
+                }else{
+                    btn.innerHTML = enabled
+                      ? `<i class="fas fa-check me-1"></i>확인 후 실행`
+                      : `<span class="spinner-border spinner-border-sm me-2" role="status" aria-hidden="true"></span>분석 결과 대기 중...`;
+                }
+            }catch(e){}
         }
 
         function _startPreviewPolling(previewId){
@@ -402,6 +436,7 @@
                 if(Date.now() - _previewPollStartedAt > 20 * 60 * 1000){
                     _stopPreviewPolling();
                     document.getElementById('preview-meta').textContent = '미리보기 타임아웃: 분석이 너무 오래 걸립니다. (20분)';
+                    _setExecuteButtonState(false, '타임아웃(다시 시도하세요)');
                     return;
                 }
 
@@ -413,6 +448,7 @@
                       document.getElementById('preview-sell-tbody').innerHTML = '<tr><td colspan="8" class="text-center text-muted">-</td></tr>';
                       document.getElementById('preview-buy-tbody').innerHTML = '<tr><td colspan="8" class="text-center text-muted">-</td></tr>';
                       document.getElementById('preview-meta').textContent = '미리보기 조회 실패: ' + (resp.message||'');
+                      _setExecuteButtonState(false, '조회 실패(다시 시도)');
                       return;
                     }
 
@@ -420,6 +456,7 @@
                     if(status === 'running'){
                       document.getElementById('preview-meta').textContent =
                         `분석 실행 중... (mode=${resp.mode}) / created_at=${resp.created_at} / expires_at=${resp.expires_at}`;
+                      _setExecuteButtonState(false, '분석 중... (잠시만 기다려주세요)');
                       return;
                     }
 
@@ -428,6 +465,7 @@
                       document.getElementById('preview-sell-tbody').innerHTML = '<tr><td colspan="8" class="text-center text-muted">-</td></tr>';
                       document.getElementById('preview-buy-tbody').innerHTML = '<tr><td colspan="8" class="text-center text-muted">-</td></tr>';
                       document.getElementById('preview-meta').textContent = '미리보기 오류: ' + (resp.error||'unknown');
+                      _setExecuteButtonState(false, '오류(다시 시도)');
                       return;
                     }
 
@@ -544,17 +582,30 @@
                       }
                       document.getElementById('preview-meta').textContent =
                         `완료 (mode=${resp.mode}) / created_at=${resp.created_at} / expires_at=${resp.expires_at}`;
+                      // 분석 결과가 준비되면 실행 버튼 활성화
+                      _setExecuteButtonState(true, '확인 후 실행');
                       return;
                     }
                   })
                   .catch(err=>{
                     // 네트워크 순간 오류는 계속 폴링
                     document.getElementById('preview-meta').textContent = '미리보기 폴링 오류(재시도): ' + err;
+                    _setExecuteButtonState(false, '네트워크 오류(재시도 중)');
                   });
             }, 2000);
         }
 
         function openTradePreview(){
+            // "즉시 실행" 클릭 시 너무 바로 진행되는 UX 개선:
+            // 최초 1회는 사용자가 미리보기를 시작할지 확인 받는다.
+            try{
+                if(!_tradePreviewConfirmOnce){
+                    const ok = confirm('즉시 실행(미리보기)을 시작할까요?\n\n- 분석 결과를 먼저 불러온 뒤\n- "확인 후 실행"을 눌러야 실제 주문이 나갑니다.');
+                    if(!ok) return;
+                    _tradePreviewConfirmOnce = true;
+                }
+            }catch(e){}
+
             _lastPreviewId = null;
             _stopPreviewPolling();
             // 초기화
@@ -571,9 +622,24 @@
             document.getElementById('preview-sell-tbody').innerHTML = '<tr><td colspan="8" class="text-center text-muted">분석 결과를 불러오는 중...</td></tr>';
             document.getElementById('preview-buy-tbody').innerHTML = '<tr><td colspan="8" class="text-center text-muted">분석 결과를 불러오는 중...</td></tr>';
             document.getElementById('preview-meta').textContent = '';
+            // 결과 준비 전까지는 실행 버튼 비활성화
+            _setExecuteButtonState(false, '분석 결과를 불러오는 중...');
 
-            const modal = new bootstrap.Modal(document.getElementById('tradePreviewModal'));
+            const modalEl = document.getElementById('tradePreviewModal');
+            const modal = new bootstrap.Modal(modalEl);
             modal.show();
+
+            // 모달이 닫힐 때 폴링 정리(백그라운드 폴링/버튼 상태 꼬임 방지)
+            try{
+                if(modalEl && !modalEl.dataset.previewCleanupBound){
+                    modalEl.dataset.previewCleanupBound = '1';
+                    modalEl.addEventListener('hidden.bs.modal', ()=>{
+                        try{ _stopPreviewPolling(); }catch(e){}
+                        try{ _lastPreviewId = null; }catch(e){}
+                        try{ _setExecuteButtonState(false, '분석 결과를 불러오는 중...'); }catch(e){}
+                    });
+                }
+            }catch(e){}
 
             fetch('/api/trade/preview', { method: 'POST' })
               .then(r=>r.json())
@@ -582,15 +648,18 @@
                   document.getElementById('preview-sell-tbody').innerHTML = '<tr><td colspan="8" class="text-center text-muted">-</td></tr>';
                   document.getElementById('preview-buy-tbody').innerHTML = '<tr><td colspan="8" class="text-center text-muted">-</td></tr>';
                   document.getElementById('preview-meta').textContent = '미리보기 실패: ' + (resp.message||'');
+                  _setExecuteButtonState(false, '미리보기 실패(다시 시도)');
                   return;
                 }
                 _lastPreviewId = resp.preview_id;
                 document.getElementById('preview-meta').textContent =
                   `분석 요청 접수됨. 결과를 불러오는 중... (mode=${resp.mode}) / created_at=${resp.created_at} / expires_at=${resp.expires_at}`;
+                _setExecuteButtonState(false, '분석 중... (잠시만 기다려주세요)');
                 _startPreviewPolling(_lastPreviewId);
               })
               .catch(err=>{
                 document.getElementById('preview-meta').textContent = '미리보기 오류: ' + err;
+                _setExecuteButtonState(false, '미리보기 오류(다시 시도)');
               });
         }
 
@@ -599,6 +668,14 @@
                 alert('미리보기 데이터를 아직 불러오지 못했습니다.');
                 return;
             }
+            // 분석 결과가 준비되기 전에는 실행을 막는다.
+            try{
+                const btn = document.getElementById('btn-preview-execute');
+                if(btn && btn.disabled){
+                    alert('분석 결과를 아직 불러오는 중입니다. 잠시만 기다려주세요.');
+                    return;
+                }
+            }catch(e){}
             if(!confirm('미리보기 결과대로 자동매매를 1회 실행할까요?')) return;
             fetch('/api/trade/execute', {
                 method:'POST',
@@ -607,6 +684,15 @@
             }).then(r=>r.json()).then(resp=>{
                 if(resp.success){
                     alert(resp.message || '실행 시작');
+                    // A안: 실행 시작하면 즉시 미리보기 팝업 닫기
+                    try{
+                        _stopPreviewPolling();
+                        const el = document.getElementById('tradePreviewModal');
+                        if(el){
+                            const modal = bootstrap.Modal.getInstance(el) || new bootstrap.Modal(el);
+                            modal.hide();
+                        }
+                    }catch(e){}
                 }else{
                     alert('실행 실패: ' + (resp.message || 'unknown'));
                 }
@@ -632,7 +718,7 @@
             });
         }
         
-        // 현재 모드 표시
+        // 현재 모드 표시 + 모의투자 공통 배너 표시
         $.get('/api/status', function(data) {
             const mode = data.status.mode;
             const text = mode === 'mock' ? '모의투자 (Mock)' : '실전투자 (Real)';
@@ -640,7 +726,27 @@
             
             $('#current-mode-text').text(text);
             $('#serverModeBtn').removeClass('btn-secondary').addClass(btnClass);
+
+            try{
+                const wrap = document.getElementById('mock-global-banner-wrap');
+                const hide = (localStorage.getItem('hideMockBanner') === '1');
+                if(wrap){
+                    wrap.style.display = (mode === 'mock' && !hide) ? '' : 'none';
+                }
+            }catch(e){}
         });
+
+        // 모의 배너 닫기(로컬 저장)
+        try{
+            const btn = document.getElementById('btn-mock-banner-close');
+            if(btn){
+                btn.addEventListener('click', ()=>{
+                    try{ localStorage.setItem('hideMockBanner','1'); }catch(e){}
+                    const wrap = document.getElementById('mock-global-banner-wrap');
+                    if(wrap) wrap.style.display = 'none';
+                });
+            }
+        }catch(e){}
     </script>
     {% block scripts %}{% endblock %}
 </body>

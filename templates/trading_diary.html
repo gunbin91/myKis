@@ -9,6 +9,13 @@
         <button class="btn btn-sm btn-outline-light" id="btn-diary-refresh"><i class="fas fa-sync-alt"></i></button>
       </div>
     </div>
+    <div class="alert alert-warning py-2 d-none" id="diary-mock-note">
+      <div class="small">
+        <strong>모의투자 안내</strong><br/>
+        - 기간손익(해외주식-032) 미지원 → 체결내역(해외주식-007) 기반으로 <strong>참고용 집계</strong>합니다.<br/>
+        - 손익/수익률은 실제와 다를 수 있으며, 일부 값은 0으로 표시될 수 있습니다.
+      </div>
+    </div>
   </div>
 </div>
 
@@ -205,6 +212,10 @@
 
     fetch('/api/status').then(r=>r.json()).then(st=>{
       const mode = st.status.mode;
+      try{
+        const note = document.getElementById('diary-mock-note');
+        if(note) note.classList.toggle('d-none', mode !== 'mock');
+      }catch(e){}
       try{
         if(window.CurrencyPref){
           window.CurrencyPref.storeFxFromBalance(st.balance || {});

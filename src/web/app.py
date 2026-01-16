@@ -3,12 +3,14 @@ import threading
 import os
 import glob
 import yaml
+import logging
 from pathlib import Path
 from datetime import datetime, timedelta
 from uuid import uuid4
 from src.engine.engine import trading_engine
 from src.engine.multi_process_scheduler import multi_process_scheduler
 from src.engine.scheduler_state_store import SchedulerStateStore
+from src.engine.execution_history_store import ExecutionHistoryStore
 from src.config.config_manager import config_manager
 from src.api.order import kis_order
 from src.api.quote import kis_quote
@@ -26,9 +28,163 @@ app = Flask(
     static_folder=str(STATIC_DIR),
 )
 
+# 터미널 노이즈 제거:
+# - 대시보드/자동매매 페이지는 /api/status 등을 주기적으로 폴링하므로,
+#   werkzeug access log가 과도하게 찍혀 운영 로그(자동매매 시작/종료/에러)를 가린다.
+# - WARNING 이상만 콘솔에 남긴다(4xx/5xx 등은 유지).
+try:
+    logging.getLogger("werkzeug").setLevel(logging.WARNING)
+except Exception:
+    pass
+
 # 멀티프로세스 스케줄러(모의/실전 동시 실행)
 _scheduler_started = False
 _scheduler_lock = threading.Lock()
+_console_reporter_started = False
+_mode_log_tail_started = False
+
+
+def _start_scheduler_console_reporter():
+    """
+    웹/헤드리스 메인 프로세스 콘솔에 자동매매 시작/종료를 요약해서 찍어준다.
+    - 스케줄러/엔진은 별도 프로세스에서 돌아가므로, 파일 기반 상태를 읽어 변화가 있을 때만 출력한다.
+    - 폴링(access) 로그를 숨긴 상태에서도 '자동매매가 실제로 도는지'를 한눈에 확인 가능.
+    """
+    global _console_reporter_started
+    if _console_reporter_started:
+        return
+    _console_reporter_started = True
+
+    def _loop():
+        prev = {
+            "mock": {"pid": None, "is_executing": None, "engine_last_run_at": None, "engine_last_error": None},
+            "real": {"pid": None, "is_executing": None, "engine_last_run_at": None, "engine_last_error": None},
+        }
+
+        # 최초 1회는 기준만 잡고 로그를 찍지 않는다(프로세스가 이미 실행 중인 경우 스팸 방지).
+        initialized = {"mock": False, "real": False}
+
+        while True:
+            try:
+                for m in ("mock", "real"):
+                    st = SchedulerStateStore(mode=m).read() or {}
+                    pid = st.get("pid")
+                    is_exec = bool(st.get("is_executing", False))
+                    eng_last = st.get("engine_last_run_at")
+                    eng_err = st.get("engine_last_error")
+                    restart_cnt = st.get("restart_count")
+
+                    if not initialized[m]:
+                        prev[m] = {"pid": pid, "is_executing": is_exec, "engine_last_run_at": eng_last, "engine_last_error": eng_err}
+                        initialized[m] = True
+                        continue
+
+                    # 프로세스 재시작 감지
+                    if pid and pid != prev[m].get("pid"):
+                        logger.warning(f"[Scheduler] {m} 프로세스 변경 감지: pid {prev[m].get('pid')} -> {pid} (restart_count={restart_cnt})")
+
+                    # 실행 시작/종료 전환 감지
+                    if (prev[m].get("is_executing") is False) and (is_exec is True):
+                        logger.info(f"[AutoTrade] 시작: mode={m}, pid={pid}")
+                    if (prev[m].get("is_executing") is True) and (is_exec is False):
+                        # 종료 시점엔 엔진 last_error를 같이 보여준다.
+                        msg = f"[AutoTrade] 종료: mode={m}, pid={pid}"
+                        if eng_err:
+                            msg += f", result=error, engine_last_error={eng_err}"
+                        else:
+                            msg += ", result=ok"
+                        if eng_last:
+                            msg += f", engine_last_run_at={eng_last}"
+                        logger.info(msg)
+
+                    # last_error만 바뀌는 경우(루프 오류 등)도 요약
+                    if eng_err and eng_err != prev[m].get("engine_last_error"):
+                        logger.warning(f"[AutoTrade] 상태: mode={m}, engine_last_error={eng_err}")
+
+                    prev[m] = {"pid": pid, "is_executing": is_exec, "engine_last_run_at": eng_last, "engine_last_error": eng_err}
+            except Exception:
+                pass
+
+            # 너무 자주 찍지 않도록 1초 간격(상태 변화가 있을 때만 실제로 출력됨)
+            try:
+                import time as _t
+                _t.sleep(1.0)
+            except Exception:
+                pass
+
+    t = threading.Thread(target=_loop, name="myKisConsoleReporter", daemon=True)
+    t.start()
+
+def _start_mode_log_tailers():
+    """
+    자동매매 "과정"을 메인 터미널에서 실시간으로 보이게 하기 위해,
+    모드별 로그 파일(logs/mock, logs/real)을 tail(follow)해서 stdout으로 출력한다.
+    - 주의: logger로 다시 기록하면 같은 파일에 재기록되어 루프/중복이 생길 수 있어 stdout(print)만 사용.
+    - 접근 로그(werkzeug)는 이미 WARNING으로 올려 노이즈를 줄여두었다.
+    """
+    global _mode_log_tail_started
+    if _mode_log_tail_started:
+        return
+    _mode_log_tail_started = True
+
+    def _tail_loop(mode: str):
+        mode = (mode or "mock").strip().lower()
+        last_date = None
+        fp = None
+        try:
+            import time as _t
+            while True:
+                try:
+                    today = datetime.now().strftime("%Y%m%d")
+                    if last_date != today or fp is None:
+                        # 날짜 변경(자정 롤오버) 또는 최초 오픈
+                        if fp:
+                            try:
+                                fp.close()
+                            except Exception:
+                                pass
+                            fp = None
+
+                        log_path = PROJECT_ROOT / "logs" / mode / f"system_{today}.log"
+                        if log_path.exists():
+                            fp = open(log_path, "r", encoding="utf-8", errors="replace")
+                            # 기존 내용 덤프 방지: 현재 시점부터 follow
+                            try:
+                                fp.seek(0, os.SEEK_END)
+                            except Exception:
+                                pass
+                            last_date = today
+                            print(f"[LogTail] {mode} 로그 추적 시작: {log_path}")
+                        else:
+                            # 파일이 아직 없으면 잠시 대기
+                            last_date = today
+
+                    if not fp:
+                        _t.sleep(0.5)
+                        continue
+
+                    line = fp.readline()
+                    if not line:
+                        _t.sleep(0.2)
+                        continue
+
+                    # 메인 터미널에 mode prefix를 붙여서 출력
+                    s = line.rstrip("\r\n")
+                    if s:
+                        print(f"[{mode.upper()}] {s}")
+                except Exception:
+                    _t.sleep(0.5)
+        finally:
+            try:
+                if fp:
+                    fp.close()
+            except Exception:
+                pass
+
+    # 모드별 tailer 실행
+    for m in ("mock", "real"):
+        t = threading.Thread(target=_tail_loop, args=(m,), name=f"myKisLogTail-{m}", daemon=True)
+        t.start()
 
 def start_scheduler():
     """
@@ -42,6 +198,10 @@ def start_scheduler():
             return
 
         multi_process_scheduler.start()
+        # 메인 프로세스 콘솔에서 자동매매 시작/종료를 확인할 수 있도록 보조 로거 시작
+        _start_scheduler_console_reporter()
+        # 메인 프로세스 콘솔에서 자동매매 과정 로그를 실시간으로 보기 위한 tailer 시작
+        _start_mode_log_tailers()
         _scheduler_started = True
 
 
@@ -672,10 +832,19 @@ def get_status():
                 fx_orderable_amt = _to_float(out3.get("frcr_use_psbl_amt"), default=0.0)
                 fx_orderable_source = "008_frcr_use"
 
-            # mock 마지막 fallback: 총자산(원화) 기반 추정(통합증거금/자동환전 느낌의 "총가용"을 흉내)
+            # mock 마지막 fallback:
+            # - 모의에서 "주문가능(USD)"를 안정적으로 제공하지 않는 케이스가 있어, 0이면 추정으로 보완한다.
+            # - 총자산/환율로 추정하면 "보유평가금액이 있어도 전재산=주문가능"처럼 보여 혼동이 크므로,
+            #   현금성(≈총자산-평가금액)/환율로 더 보수적으로 추정한다.
             if mode == "mock" and (fx_orderable_amt is None or fx_orderable_amt <= 0):
                 tot_asst_krw = _to_float(out3.get("tot_asst_amt"), default=0.0)
-                if usd_krw_rate_effective > 0 and tot_asst_krw > 0:
+                evlu_krw = _to_float(out3.get("evlu_amt_smtl") or out3.get("evlu_amt_smtl_amt"), default=0.0)
+                cash_krw = max(0.0, tot_asst_krw - evlu_krw)
+                if usd_krw_rate_effective > 0 and cash_krw > 0:
+                    fx_orderable_amt = cash_krw / usd_krw_rate_effective
+                    fx_orderable_source = "mock_est_cash_krw"
+                elif usd_krw_rate_effective > 0 and tot_asst_krw > 0:
+                    # 최후 폴백(기존 동작): 현금성 추정이 0으로 떨어질 때만 총자산 기반
                     fx_orderable_amt = tot_asst_krw / usd_krw_rate_effective
                     fx_orderable_source = "mock_est_tot_asset"
     except Exception:
@@ -824,6 +993,23 @@ def api_quote_detail():
     except Exception as e:
         return jsonify({"success": False, "message": str(e)})
 
+@app.route('/api/quote/product-info')
+def api_quote_product_info():
+    try:
+        mode = request.args.get("mode") or config_manager.get("common.mode", "mock")
+        exchange = request.args.get("exchange", "NASD")
+        symbol = request.args.get("symbol")
+        if not symbol:
+            return jsonify({"success": False, "message": "missing_symbol"})
+        if mode == "mock":
+            return jsonify({"success": False, "message": "mock_not_supported"})
+        out = kis_quote.get_product_info(exchange, symbol, mode=mode)
+        if not out:
+            return jsonify({"success": False, "message": "no_data"})
+        return jsonify({"success": True, "data": out})
+    except Exception as e:
+        return jsonify({"success": False, "message": str(e)})
+
 @app.route('/api/account/buyable')
 def api_account_buyable():
     try:
@@ -831,9 +1017,14 @@ def api_account_buyable():
         exchange = request.args.get("exchange", "NASD")
         symbol = request.args.get("symbol")
         price = request.args.get("price")
+        debug = str(request.args.get("debug") or "").strip().lower() in ("1", "true", "yes", "y")
         if not symbol or not price:
             return jsonify({"success": False, "message": "missing_params"})
-        out = kis_order.get_buyable_amount(exchange=exchange, symbol=symbol, price=float(price), mode=mode)
+        out = kis_order.get_buyable_amount(exchange=exchange, symbol=symbol, price=float(price), mode=mode, debug=debug)
+        if debug and isinstance(out, dict) and out.get("_error"):
+            return jsonify({"success": False, "error": out.get("_error")})
+        if out is None:
+            return jsonify({"success": False, "message": "buyable_failed"})
         return jsonify({"success": True, "data": out})
     except Exception as e:
         return jsonify({"success": False, "message": str(e)})
@@ -1169,6 +1360,47 @@ def api_auto_trading_set_strategy():
     except Exception as e:
         return jsonify({"success": False, "message": str(e)})
 
+
+@app.route("/api/auto-trading/history", methods=["GET"])
+def api_auto_trading_history():
+    """
+    자동매매 실행 이력 조회 (모드별).
+    - GET /api/auto-trading/history?mode=mock&days=7
+    """
+    try:
+        mode = request.args.get("mode") or config_manager.get("common.mode", "mock")
+        days = int(request.args.get("days") or 7)
+        if mode not in ("mock", "real"):
+            return jsonify({"success": False, "message": "invalid_mode"})
+        data = ExecutionHistoryStore(mode=mode).list(days=days)
+        # 목록에서는 무거운 raw analysis는 생략(팝업 상세에서 조회)
+        slim = []
+        for r in data:
+            rr = dict(r)
+            rr.pop("analysis", None)
+            slim.append(rr)
+        return jsonify({"success": True, "mode": mode, "data": slim})
+    except Exception as e:
+        return jsonify({"success": False, "message": str(e)})
+
+
+@app.route("/api/auto-trading/history/<run_id>", methods=["GET"])
+def api_auto_trading_history_detail(run_id: str):
+    """
+    자동매매 실행 이력 상세 조회 (run_id).
+    - GET /api/auto-trading/history/<run_id>?mode=mock
+    """
+    try:
+        mode = request.args.get("mode") or config_manager.get("common.mode", "mock")
+        if mode not in ("mock", "real"):
+            return jsonify({"success": False, "message": "invalid_mode"})
+        item = ExecutionHistoryStore(mode=mode).get(run_id=run_id)
+        if not item:
+            return jsonify({"success": False, "message": "not_found"})
+        return jsonify({"success": True, "mode": mode, "data": item})
+    except Exception as e:
+        return jsonify({"success": False, "message": str(e)})
+
 @app.route('/api/server/select', methods=['POST'])
 def api_server_select():
     """myKiwoom-main과 동일한 UX를 위해 server selection API 제공"""
@@ -1302,7 +1534,12 @@ def _build_trade_preview_view(analysis: dict | None, mode: str) -> dict:
 
     if mode == "mock" and orderable_usd <= 0:
         tot_asst_krw = _to_float(out3.get("tot_asst_amt"), 0.0)
-        if usd_krw_rate > 0 and tot_asst_krw > 0:
+        evlu_krw = _to_float(out3.get("evlu_amt_smtl") or out3.get("evlu_amt_smtl_amt"), 0.0)
+        cash_krw = max(0.0, tot_asst_krw - evlu_krw)
+        if usd_krw_rate > 0 and cash_krw > 0:
+            orderable_usd = cash_krw / usd_krw_rate
+            orderable_source = "mock_est_cash_krw"
+        elif usd_krw_rate > 0 and tot_asst_krw > 0:
             orderable_usd = tot_asst_krw / usd_krw_rate
             orderable_source = "mock_est_tot_asset"
 

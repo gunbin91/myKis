@@ -53,6 +53,49 @@
               </div>
             </div>
           </div>
+          <div class="col-lg-6">
+            <div class="card bg-dark border-secondary">
+              <div class="card-header border-secondary d-flex justify-content-between align-items-center">
+                <strong>자동매매 실행 이력</strong>
+                <button class="btn btn-sm btn-outline-light" id="btn-history-refresh"><i class="fas fa-sync-alt"></i></button>
+              </div>
+              <div class="card-body">
+                <div class="d-flex gap-2 align-items-end mb-2">
+                  <div>
+                    <label class="form-label small mb-1">최근 N일</label>
+                    <select class="form-select form-select-sm" id="history-days" style="width: 120px;">
+                      <option value="1">1일</option>
+                      <option value="3">3일</option>
+                      <option value="7" selected>7일</option>
+                      <option value="14">14일</option>
+                      <option value="30">30일</option>
+                    </select>
+                  </div>
+                  <div class="text-muted small" id="history-meta">-</div>
+                </div>
+                <div class="table-responsive">
+                  <table class="table table-sm table-dark table-hover align-middle mb-0">
+                    <thead class="table-secondary">
+                      <tr>
+                        <th>시간</th>
+                        <th>상태</th>
+                        <th class="text-end">매수시도</th>
+                        <th class="text-end">매도시도</th>
+                        <th class="text-end">스킵</th>
+                        <th class="text-end">에러</th>
+                      </tr>
+                    </thead>
+                    <tbody id="history-tbody">
+                      <tr><td colspan="6" class="text-center text-muted py-3">로딩 중...</td></tr>
+                    </tbody>
+                  </table>
+                </div>
+                <div class="form-text text-muted mt-2">
+                  행을 클릭하면 해당 실행의 <strong>분석 리스트/매수·매도 시도/실패(스킵) 사유</strong>를 상세로 확인할 수 있습니다.
+                </div>
+              </div>
+            </div>
+          </div>
         </div>
       </div>
 
@@ -142,6 +185,13 @@
                     </select>
                     <div class="form-text text-muted">
                       해외주식 호가 API(해외주식-033)는 <strong>모의투자 미지원</strong>이라, 모의에서는 지정가(슬리피지) 방식으로 동작합니다.
+                    </div>
+                    <div class="alert alert-warning py-2 mt-2 d-none" id="mock-buy-method-alert">
+                      <div class="small">
+                        <strong>모의투자 안내</strong><br/>
+                        - 호가(해외주식-033), 미체결(해외주식-005) 미지원 → <strong>호가단계 매수는 실행되지 않고</strong> 슬리피지 지정가로 대체됩니다.<br/>
+                        - 아래 가드/호가단계/대기시간 설정은 <strong>실전에서만 의미</strong>가 있습니다.
+                      </div>
                     </div>
                   </div>
                   <div class="col-md-6">
@@ -253,7 +303,36 @@
 
         // 매수 방식/가드
         const defaultBuyMethod = (mode === 'real') ? 'limit_ask_ladder' : 'limit_slippage';
-        document.getElementById('buy-order-method').value = (s.strategy.buy_order_method || defaultBuyMethod);
+        const selBuyMethod = document.getElementById('buy-order-method');
+        const optAsk = selBuyMethod ? selBuyMethod.querySelector('option[value="limit_ask_ladder"]') : null;
+        const alertEl = document.getElementById('mock-buy-method-alert');
+
+        // 모의투자에서는 호가 기반 매수(ask ladder)가 실제로 동작하지 않으므로, UI에서 혼동을 막는다.
+        // - 표시/저장은 모드별로 분리되어 있으므로, mock 화면에서는 slippage를 기본으로 보여준다.
+        if(mode === 'mock'){
+          if(alertEl) alertEl.classList.remove('d-none');
+          if(optAsk){
+            optAsk.disabled = true;
+            optAsk.textContent = '매도호가 기반 지정가(실전 전용: 모의 미지원)';
+          }
+          if(selBuyMethod) selBuyMethod.value = 'limit_slippage';
+          // 실전 전용 파라미터는 입력은 가능하되, 혼동 방지용으로 비활성 처리
+          for(const id of ['limit-buy-max-premium-pct','limit-buy-max-levels','limit-buy-step-wait-sec']){
+            const el = document.getElementById(id);
+            if(el) el.disabled = true;
+          }
+        }else{
+          if(alertEl) alertEl.classList.add('d-none');
+          if(optAsk){
+            optAsk.disabled = false;
+            optAsk.textContent = '매도호가 기반 지정가(1호가→상향 재시도, 실전 추천)';
+          }
+          for(const id of ['limit-buy-max-premium-pct','limit-buy-max-levels','limit-buy-step-wait-sec']){
+            const el = document.getElementById(id);
+            if(el) el.disabled = false;
+          }
+          if(selBuyMethod) selBuyMethod.value = (s.strategy.buy_order_method || defaultBuyMethod);
+        }
         document.getElementById('limit-buy-max-premium-pct').value = (s.strategy.limit_buy_max_premium_pct ?? 1.0);
         document.getElementById('limit-buy-max-levels').value = (s.strategy.limit_buy_max_levels ?? 5);
         document.getElementById('limit-buy-step-wait-sec').value = (s.strategy.limit_buy_step_wait_sec ?? 1.0);
@@ -309,6 +388,438 @@
     });
   }
 
+  function _pretty(obj){
+    try{ return JSON.stringify(obj, null, 2); }catch(e){ return String(obj); }
+  }
+
+  function _escapeHtml(s){
+    return String(s ?? '')
+      .replaceAll('&','&amp;')
+      .replaceAll('<','&lt;')
+      .replaceAll('>','&gt;')
+      .replaceAll('"','&quot;')
+      .replaceAll("'","&#039;");
+  }
+
+  function _fmtNum(v, digits=2){
+    const x = parseFloat((''+(v ?? '')).replace(/,/g,''));
+    if(isNaN(x)) return '-';
+    return x.toLocaleString(undefined,{maximumFractionDigits: digits});
+  }
+
+  function _fmtUsd(v, digits=2){
+    const x = parseFloat((''+(v ?? '')).replace(/,/g,''));
+    if(isNaN(x)) return '-';
+    return '$' + x.toLocaleString(undefined,{maximumFractionDigits: digits});
+  }
+
+  function _fmtDateTime(s){
+    if(!s) return '-';
+    return String(s).replace('T',' ');
+  }
+
+  function _durationSec(startedAt, finishedAt){
+    try{
+      if(!startedAt || !finishedAt) return null;
+      const a = new Date(startedAt); const b = new Date(finishedAt);
+      const ms = b - a;
+      if(!isFinite(ms)) return null;
+      return Math.max(0, Math.round(ms/1000));
+    }catch(e){ return null; }
+  }
+
+  function _statusBadge(status){
+    const s = (status||'unknown').toLowerCase();
+    const cls = (s==='success') ? 'bg-success'
+      : (s==='error') ? 'bg-danger'
+      : (s==='no_trade') ? 'bg-secondary'
+      : 'bg-warning text-dark';
+    return `<span class="badge ${cls}">${_escapeHtml(s)}</span>`;
+  }
+
+  function _runTypeBadge(t){
+    const x = (t||'-').toLowerCase();
+    const cls = (x==='manual') ? 'bg-warning text-dark' : 'bg-info text-dark';
+    const label = (x==='manual') ? '수동' : '스케줄';
+    return `<span class="badge ${cls}">${label}</span>`;
+  }
+
+  function _reasonText(code){
+    const m = {
+      // buy
+      "quote_failed": "시세 조회 실패",
+      "price_zero": "현재가 0",
+      "budget_insufficient": "예산 부족(수량 0)",
+      "buyable_query_failed": "매수가능조회(v1_014) 실패",
+      "qty_insufficient": "매수가능수량 부족",
+      "ladder_failed_no_fallback:guard_triggered": "호가 가드 발동(과매수 방지)",
+      "ladder_failed_no_fallback:cancel_failed": "미체결 취소 실패(안전 중단)",
+      "ladder_failed_no_fallback:unfilled_remaining": "미체결 잔량 남음(안전 중단)",
+      "ladder_failed_no_fallback:order_no_missing": "주문번호 없음(안전 중단)",
+      "buy_skipped_fx_rate_unavailable": "환율 실패로 매수 스킵",
+      // sell
+      "take_profit_price_unavailable": "익절 매도: 현재가 0",
+      "stop_loss_price_unavailable": "손절 매도: 현재가 0",
+      "max_hold_price_unavailable": "보유기간 매도: 현재가 0",
+      "analysis_sell_price_unavailable": "분석 매도: 현재가 0",
+    };
+    return m[code] || code || '-';
+  }
+
+  function _traceStepText(step){
+    const m = {
+      "token.ready":"토큰 확보 완료",
+      "token.wait.timeout":"토큰 확보 실패(시간초과)",
+      "fx.ready":"환율 확보 완료",
+      "fx.unavailable":"환율 실패",
+      "balance.ok":"잔고 조회 성공",
+      "balance.failed":"잔고 조회 실패",
+      "analysis.fetch.start":"분석 요청 시작",
+      "analysis.start":"분석서버 시작",
+      "analysis.poll.start":"분석 결과 폴링 시작",
+      "analysis.poll.waiting":"분석 대기 중",
+      "analysis.poll.unexpected_format":"분석 결과 포맷 대기",
+      "analysis.poll.done":"분석 완료",
+      "analysis.poll.timeout":"분석 시간초과",
+      "analysis.exception":"분석 예외",
+      "analysis.mock_enabled":"분석 Mock 모드",
+      "budget.ready":"예산 산정 완료",
+      "buy.ladder.cancel":"미체결 취소",
+      "buy.ladder.hoga_failed":"호가 조회 실패",
+      "buy.ladder.hoga_empty":"호가 데이터 없음",
+      "buy.ladder.start":"호가 매수 시작",
+      "buy.ladder.level.begin":"호가 단계 시작",
+      "buy.ladder.guard_triggered":"호가 가드 발동(스킵)",
+      "buy.ladder.qty_insufficient":"호가 단계: 매수가능수량 부족",
+      "buy.ladder.order.submit":"호가 단계: 주문 전송",
+      "buy.ladder.order.no_order_no":"호가 단계: 주문번호 없음(중단)",
+      "buy.ladder.unfilled":"호가 단계: 미체결 잔량 발생",
+      "buy.ladder.cancel_failed":"호가 단계: 취소 실패(중단)",
+      "buy.ladder.level.next":"다음 호가로 재시도",
+      "buy.ladder.filled_or_removed":"체결/미체결 목록에서 제거됨(완료)",
+      "buy.ladder.unfilled_remaining":"최대 호가 단계 소진(잔량 남음)",
+    };
+    return m[step] || step || '-';
+  }
+
+  function _safeRawJson(d){
+    // 너무 큰 필드는 축약해서 UI가 멈추지 않게 한다.
+    try{
+      const x = JSON.parse(JSON.stringify(d || {}));
+      try{
+        const ts = x?.analysis?.meta?.top_stocks;
+        if(Array.isArray(ts) && ts.length > 50){
+          x.analysis.meta.top_stocks = ts.slice(0,50);
+          x.analysis.meta.top_stocks_truncated = true;
+          x.analysis.meta.top_stocks_total = ts.length;
+        }
+      }catch(e){}
+      try{
+        if(x?.analysis?.meta && x.analysis.meta.raw){
+          delete x.analysis.meta.raw;
+        }
+      }catch(e){}
+      return JSON.stringify(x, null, 2);
+    }catch(e){
+      return _pretty(d);
+    }
+  }
+
+  function loadHistory(){
+    return fetch('/api/status').then(r=>r.json()).then(st=>{
+      const mode = st.status.mode;
+      const days = parseInt((document.getElementById('history-days')||{}).value || '7', 10) || 7;
+      const metaEl = document.getElementById('history-meta');
+      if(metaEl) metaEl.textContent = `mode=${mode}, days=${days}`;
+
+      return fetch(`/api/auto-trading/history?mode=${encodeURIComponent(mode)}&days=${encodeURIComponent(days)}`)
+        .then(r=>r.json()).then(resp=>{
+          const tbody = document.getElementById('history-tbody');
+          if(!tbody) return;
+          if(!resp.success){
+            tbody.innerHTML = `<tr><td colspan="6" class="text-center text-muted py-3">조회 실패: ${(resp.message||'unknown')}</td></tr>`;
+            return;
+          }
+          const rows = resp.data || [];
+          if(!rows.length){
+            tbody.innerHTML = `<tr><td colspan="6" class="text-center text-muted py-3">이력이 없습니다.</td></tr>`;
+            return;
+          }
+          tbody.innerHTML = '';
+          for(const r of rows){
+            const status = (r.status || '-');
+            const cls = (status === 'success') ? 'text-success' : (status === 'error' ? 'text-danger' : 'text-warning');
+            const started = (r.started_at || r.finished_at || '-');
+            const buyN = (r.buy_attempts || []).length;
+            const sellN = (r.sell_attempts || []).length;
+            const skipN = (r.skips || []).length;
+            const errN = (r.errors || []).length;
+            const rid = r.run_id || '';
+
+            const tr = document.createElement('tr');
+            tr.style.cursor = 'pointer';
+            tr.dataset.runId = rid;
+            tr.innerHTML = `
+              <td class="text-muted">${started}</td>
+              <td class="${cls}">${status}</td>
+              <td class="text-end">${buyN}</td>
+              <td class="text-end">${sellN}</td>
+              <td class="text-end">${skipN}</td>
+              <td class="text-end">${errN}</td>
+            `;
+            tr.addEventListener('click', ()=>openHistoryDetail(rid, mode));
+            tbody.appendChild(tr);
+          }
+        });
+    });
+  }
+
+  function openHistoryDetail(runId, mode){
+    if(!runId) return;
+    fetch(`/api/auto-trading/history/${encodeURIComponent(runId)}?mode=${encodeURIComponent(mode)}`)
+      .then(r=>r.json()).then(resp=>{
+        if(!resp.success){
+          alert('상세 조회 실패: ' + (resp.message || 'unknown'));
+          return;
+        }
+        const d = resp.data || {};
+
+        // badges
+        const badgesEl = document.getElementById('hist-badges');
+        if(badgesEl){
+          const dur = _durationSec(d.started_at, d.finished_at);
+          const durText = (dur===null) ? '' : ` <span class="badge bg-secondary">${dur}s</span>`;
+          badgesEl.innerHTML = `
+            ${_statusBadge(d.status)} ${_runTypeBadge(d.run_type)}
+            <span class="badge bg-secondary">${_escapeHtml(d.mode || mode || '-')}</span>
+            <span class="badge bg-dark border border-secondary">${_escapeHtml(d.run_id || '')}</span>
+            ${durText}
+          `;
+        }
+
+        // summary table
+        const sumTbody = document.getElementById('hist-summary-tbody');
+        if(sumTbody){
+          const dur = _durationSec(d.started_at, d.finished_at);
+          const msg = d.message || '-';
+          sumTbody.innerHTML = `
+            <tr><td class="text-muted" style="width:120px;">시작</td><td>${_escapeHtml(_fmtDateTime(d.started_at))}</td></tr>
+            <tr><td class="text-muted">종료</td><td>${_escapeHtml(_fmtDateTime(d.finished_at))}</td></tr>
+            <tr><td class="text-muted">소요</td><td>${dur===null?'-':(dur+'초')}</td></tr>
+            <tr><td class="text-muted">메시지</td><td>${_escapeHtml(msg)}</td></tr>
+          `;
+        }
+
+        // snapshot (fx/budget/strategy)
+        const snap = d.snapshot || {};
+        const fx = snap.fx || {};
+        const budget = snap.budget || {};
+        const stg = snap.strategy || {};
+        const fxEl = document.getElementById('hist-fx-text');
+        if(fxEl){
+          const r = fx.usd_krw_rate;
+          const allow = (fx.allow_buy === false) ? `<span class="badge bg-warning text-dark ms-1">매수 스킵</span>` : `<span class="badge bg-success ms-1">매수 가능</span>`;
+          fxEl.innerHTML = `${(r && r>0)?(_fmtNum(r,2)+'원'):'-'} <span class="text-muted small">(source=${_escapeHtml(fx.source||'-')})</span>${allow}`;
+          if(fx.error){
+            fxEl.innerHTML += `<div class="text-muted small">error=${_escapeHtml(fx.error)}</div>`;
+          }
+        }
+        const budEl = document.getElementById('hist-budget-text');
+        if(budEl){
+          const src = budget.orderable_source || '-';
+          budEl.innerHTML = `
+            주문가능: ${_fmtUsd(budget.orderable_usd,2)} <span class="text-muted small">(source=${_escapeHtml(src)})</span><br/>
+            제외예수금: ${_fmtUsd(budget.reserve_cash_usd,2)} · 총예산: <strong>${_fmtUsd(budget.total_budget_usd,2)}</strong><br/>
+            종목당: ${_fmtUsd(budget.per_stock_budget_usd,2)} · 후보수: ${_escapeHtml(budget.candidate_count ?? '-') }
+          `;
+        }
+        const stEl = document.getElementById('hist-strategy-text');
+        if(stEl){
+          const snapMode = ((snap && snap.mode) ? snap.mode : (d.mode || '')).toString().toLowerCase();
+          const method = stg.buy_order_method || '-';
+          let methodTxt = (method === 'limit_ask_ladder') ? '호가단계(실전)' : '슬리피지 지정가';
+          let methodNote = '';
+          // 모의투자에서는 호가/미체결 미지원으로 ask ladder가 실행되지 않는다. (실제 실행은 buy_attempts.method로 확인)
+          if(snapMode === 'mock'){
+            methodTxt = '슬리피지 지정가(모의 대체)';
+            if(method === 'limit_ask_ladder'){
+              methodNote = ' <span class="badge bg-warning text-dark ms-1">설정은 호가단계였으나 모의 미지원</span>';
+            }else{
+              methodNote = ' <span class="badge bg-secondary ms-1">모의</span>';
+            }
+          }
+          stEl.innerHTML = `
+            top_n=${_escapeHtml(stg.top_n)} · 슬리피지=${_escapeHtml(stg.slippage_pct)}% · 익절=${_escapeHtml(stg.take_profit_pct)}% · 손절=${_escapeHtml(stg.stop_loss_pct)}% · 최대보유=${_escapeHtml(stg.max_hold_days)}일<br/>
+            매수방식=${_escapeHtml(methodTxt)}${methodNote} · 가드(+%)=${_escapeHtml(stg.limit_buy_max_premium_pct)} · 최대호가=${_escapeHtml(stg.limit_buy_max_levels)} · 단계대기=${_escapeHtml(stg.limit_buy_step_wait_sec)}s
+          `;
+        }
+
+        // attempts tables
+        const buyAttempts = (d.buy_attempts || []);
+        const sellAttempts = (d.sell_attempts || []);
+        const bMeta = document.getElementById('hist-buy-attempts-meta');
+        if(bMeta) bMeta.textContent = `${buyAttempts.length}건`;
+        const sMeta = document.getElementById('hist-sell-attempts-meta');
+        if(sMeta) sMeta.textContent = `${sellAttempts.length}건`;
+
+        const bTbody = document.getElementById('hist-buy-attempts-tbody');
+        if(bTbody){
+          if(!buyAttempts.length){
+            bTbody.innerHTML = `<tr><td colspan="5" class="text-center text-muted">없음</td></tr>`;
+          }else{
+            bTbody.innerHTML = buyAttempts.map(a=>{
+              const ok = !!a.ok;
+              const badge = ok ? '<span class="badge bg-success">OK</span>' : '<span class="badge bg-danger">FAIL</span>';
+              const m = a.method || '-';
+              const mTxt = (m==='ask_ladder') ? `호가${a.level||''}` : (m==='slippage_fallback' ? '슬리피지(폴백)' : (m==='slippage' ? '슬리피지' : m));
+              const sym = `${_escapeHtml(a.symbol||'-')}<div class="text-muted small">${_escapeHtml(a.exchange||'-')} ${a.order_no?('· '+_escapeHtml(a.order_no)):''}</div>`;
+              return `
+                <tr>
+                  <td>${sym}</td>
+                  <td class="text-end">${_escapeHtml(a.qty ?? '-')}</td>
+                  <td class="text-end">${_fmtUsd(a.price,4)}</td>
+                  <td>${_escapeHtml(mTxt)}</td>
+                  <td>${badge}</td>
+                </tr>
+              `;
+            }).join('');
+          }
+        }
+
+        const sTbody = document.getElementById('hist-sell-attempts-tbody');
+        if(sTbody){
+          if(!sellAttempts.length){
+            sTbody.innerHTML = `<tr><td colspan="5" class="text-center text-muted">없음</td></tr>`;
+          }else{
+            sTbody.innerHTML = sellAttempts.map(a=>{
+              const ok = !!a.ok;
+              const badge = ok ? '<span class="badge bg-success">OK</span>' : '<span class="badge bg-danger">FAIL</span>';
+              const sym = `${_escapeHtml(a.symbol||'-')}<div class="text-muted small">${_escapeHtml(a.exchange||'-')} ${a.order_no?('· '+_escapeHtml(a.order_no)):''}</div>`;
+              return `
+                <tr>
+                  <td>${sym}</td>
+                  <td class="text-end">${_escapeHtml(a.qty ?? '-')}</td>
+                  <td class="text-end">${_fmtUsd(a.price,4)}</td>
+                  <td>${_escapeHtml(_reasonText(a.reason))}</td>
+                  <td>${badge}</td>
+                </tr>
+              `;
+            }).join('');
+          }
+        }
+
+        // analysis lists (limit to 30 for UI)
+        const aBuy = Array.isArray(d.analysis_buy) ? d.analysis_buy : [];
+        const aSell = Array.isArray(d.analysis_sell) ? d.analysis_sell : [];
+        const aBuyMeta = document.getElementById('hist-analysis-buy-meta');
+        if(aBuyMeta) aBuyMeta.textContent = `${aBuy.length}건`;
+        const aSellMeta = document.getElementById('hist-analysis-sell-meta');
+        if(aSellMeta) aSellMeta.textContent = `${aSell.length}건`;
+
+        const aBuyTbody = document.getElementById('hist-analysis-buy-tbody');
+        if(aBuyTbody){
+          const rows = aBuy.slice(0,30);
+          if(!rows.length){
+            aBuyTbody.innerHTML = `<tr><td colspan="5" class="text-center text-muted">없음</td></tr>`;
+          }else{
+            aBuyTbody.innerHTML = rows.map((x,idx)=>`
+              <tr>
+                <td class="text-muted">${idx+1}</td>
+                <td>${_escapeHtml(x.code||x.symbol||'-')}<div class="text-muted small">${_escapeHtml(x.name||'')}</div></td>
+                <td>${_escapeHtml(x.exchange||'-')}</td>
+                <td class="text-end">${_fmtUsd(x.price,4)}</td>
+                <td class="text-end">${_fmtNum(x.score,2)}</td>
+              </tr>
+            `).join('');
+          }
+        }
+        const aSellTbody = document.getElementById('hist-analysis-sell-tbody');
+        if(aSellTbody){
+          const rows = aSell.slice(0,30);
+          if(!rows.length){
+            aSellTbody.innerHTML = `<tr><td colspan="5" class="text-center text-muted">없음</td></tr>`;
+          }else{
+            aSellTbody.innerHTML = rows.map((x,idx)=>`
+              <tr>
+                <td class="text-muted">${idx+1}</td>
+                <td>${_escapeHtml(x.code||x.symbol||'-')}<div class="text-muted small">${_escapeHtml(x.name||'')}</div></td>
+                <td>${_escapeHtml(x.exchange||'-')}</td>
+                <td class="text-end">${_fmtUsd(x.price,4)}</td>
+                <td class="text-end">${_fmtNum(x.score,2)}</td>
+              </tr>
+            `).join('');
+          }
+        }
+
+        // skips/errors + excluded
+        const skips = Array.isArray(d.skips) ? d.skips : [];
+        const errs = Array.isArray(d.errors) ? d.errors : [];
+        const skipsEl = document.getElementById('hist-skips-list');
+        if(skipsEl){
+          if(!skips.length){
+            skipsEl.innerHTML = `<li class="list-group-item bg-dark text-muted">없음</li>`;
+          }else{
+            skipsEl.innerHTML = skips.slice(0,200).map(s=>{
+              const side = (s.side||'-').toUpperCase();
+              const sym = s.symbol || '-';
+              const reason = _reasonText(s.reason);
+              const detail = s.detail ? `<div class="text-muted small">${_escapeHtml(_pretty(s.detail))}</div>` : '';
+              return `<li class="list-group-item bg-dark"><span class="badge bg-secondary me-1">${_escapeHtml(side)}</span><strong>${_escapeHtml(sym)}</strong> · ${_escapeHtml(reason)}${detail}</li>`;
+            }).join('');
+          }
+        }
+        const errsEl = document.getElementById('hist-errors-list');
+        if(errsEl){
+          if(!errs.length){
+            errsEl.innerHTML = `<li class="list-group-item bg-dark text-muted">없음</li>`;
+          }else{
+            errsEl.innerHTML = errs.slice(0,200).map(e=>`<li class="list-group-item bg-dark text-danger">${_escapeHtml(e)}</li>`).join('');
+          }
+        }
+        const exBuy = (d.excluded && Array.isArray(d.excluded.buy)) ? d.excluded.buy : [];
+        const exBuyTbody = document.getElementById('hist-excluded-buy-tbody');
+        if(exBuyTbody){
+          if(!exBuy.length){
+            exBuyTbody.innerHTML = `<tr><td colspan="2" class="text-center text-muted">없음</td></tr>`;
+          }else{
+            const reasonMap = { "already_held":"보유중 제외", "beyond_top_n":"top_n 밖" };
+            exBuyTbody.innerHTML = exBuy.slice(0,200).map(x=>`
+              <tr><td>${_escapeHtml(x.symbol||'-')}</td><td class="text-muted">${_escapeHtml(reasonMap[x.reason]||x.reason||'-')}</td></tr>
+            `).join('');
+          }
+        }
+
+        // trace
+        const tr = Array.isArray(d.trace) ? d.trace : [];
+        const trTbody = document.getElementById('hist-trace-tbody');
+        if(trTbody){
+          if(!tr.length){
+            trTbody.innerHTML = `<tr><td colspan="3" class="text-center text-muted">없음</td></tr>`;
+          }else{
+            trTbody.innerHTML = tr.slice(-200).map(x=>{
+              const info = Object.assign({}, x);
+              delete info.ts; delete info.step;
+              const infoText = Object.keys(info).length ? _escapeHtml(_pretty(info)) : '';
+              return `<tr><td class="text-muted">${_escapeHtml(_fmtDateTime(x.ts))}</td><td><span class="badge bg-secondary">${_escapeHtml(_traceStepText(x.step))}</span></td><td class="small">${infoText}</td></tr>`;
+            }).join('');
+          }
+        }
+
+        // raw
+        const rawEl = document.getElementById('hist-raw-json');
+        if(rawEl) rawEl.textContent = _safeRawJson(d);
+
+        const meta = document.getElementById('hist-detail-meta');
+        if(meta) meta.textContent = `※ ok=true는 '주문 접수'이며, 실제 체결/잔고 반영과 다를 수 있습니다. (해외주식은 체결/미체결 반영이 지연될 수 있음)`;
+
+        const modalEl = document.getElementById('historyDetailModal');
+        if(modalEl){
+          const modal = new bootstrap.Modal(modalEl);
+          modal.show();
+        }
+      });
+  }
+
   document.getElementById('save-btn').addEventListener('click', function(){
     fetch('/api/status').then(r=>r.json()).then(d=>{
       const mode = d.status.mode;
@@ -350,6 +861,7 @@
         else alert('저장 실패: ' + (resp.message || 'unknown'));
         loadStrategy();
         loadStatus();
+        loadHistory();
       });
     });
   });
@@ -371,8 +883,213 @@
   loadStrategy();
   loadStatus();
   document.getElementById('schedule-time').addEventListener('change', updateNextScheduleText);
+  // 실행 이력
+  try{
+    const elDays = document.getElementById('history-days');
+    if(elDays) elDays.addEventListener('change', loadHistory);
+    const elBtn = document.getElementById('btn-history-refresh');
+    if(elBtn) elBtn.addEventListener('click', loadHistory);
+  }catch(e){}
+  loadHistory();
   setInterval(loadStatus, 5000);
+  setInterval(loadHistory, 10000);
 </script>
+
+<!-- 실행 이력 상세 모달 (해외주식 사용자 친화 UI) -->
+<div class="modal fade" id="historyDetailModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-xl modal-dialog-centered">
+    <div class="modal-content bg-dark border-secondary">
+      <div class="modal-header border-secondary">
+        <h5 class="modal-title"><i class="fas fa-clock-rotate-left me-2"></i>자동매매 실행 이력 상세</h5>
+        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <div class="modal-body">
+        <div class="d-flex flex-wrap gap-2 mb-2" id="hist-badges"></div>
+
+        <div class="row g-3">
+          <div class="col-md-4">
+            <div class="card bg-dark border-secondary">
+              <div class="card-header border-secondary"><strong>요약</strong></div>
+              <div class="card-body small">
+                <table class="table table-sm table-dark mb-0">
+                  <tbody id="hist-summary-tbody">
+                    <tr><td class="text-muted">로딩 중...</td><td></td></tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+          <div class="col-md-8">
+            <div class="card bg-dark border-secondary">
+              <div class="card-header border-secondary"><strong>환율/예산 스냅샷(USD 기준)</strong></div>
+              <div class="card-body small">
+                <div class="row g-2">
+                  <div class="col-md-6">
+                    <div class="text-muted">환율(USD/KRW)</div>
+                    <div id="hist-fx-text">-</div>
+                  </div>
+                  <div class="col-md-6">
+                    <div class="text-muted">매수 예산(USD)</div>
+                    <div id="hist-budget-text">-</div>
+                  </div>
+                  <div class="col-12">
+                    <div class="text-muted mt-2">전략</div>
+                    <div id="hist-strategy-text">-</div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="col-12">
+            <ul class="nav nav-tabs" role="tablist">
+              <li class="nav-item" role="presentation">
+                <button class="nav-link active" data-bs-toggle="tab" data-bs-target="#hist-tab-orders" type="button" role="tab">주문/시도</button>
+              </li>
+              <li class="nav-item" role="presentation">
+                <button class="nav-link" data-bs-toggle="tab" data-bs-target="#hist-tab-analysis" type="button" role="tab">분석 리스트</button>
+              </li>
+              <li class="nav-item" role="presentation">
+                <button class="nav-link" data-bs-toggle="tab" data-bs-target="#hist-tab-skips" type="button" role="tab">스킵/에러</button>
+              </li>
+              <li class="nav-item" role="presentation">
+                <button class="nav-link" data-bs-toggle="tab" data-bs-target="#hist-tab-trace" type="button" role="tab">실행 과정</button>
+              </li>
+              <li class="nav-item" role="presentation">
+                <button class="nav-link" data-bs-toggle="tab" data-bs-target="#hist-tab-raw" type="button" role="tab">원본(JSON)</button>
+              </li>
+            </ul>
+            <div class="tab-content border border-secondary border-top-0 p-3">
+              <div class="tab-pane fade show active" id="hist-tab-orders" role="tabpanel">
+                <div class="row g-2">
+                  <div class="col-md-6">
+                    <div class="d-flex justify-content-between align-items-center mb-1">
+                      <strong>매수 시도</strong>
+                      <span class="text-muted small" id="hist-buy-attempts-meta">-</span>
+                    </div>
+                    <div class="table-responsive">
+                      <table class="table table-sm table-dark table-hover align-middle mb-0">
+                        <thead class="table-secondary">
+                          <tr><th>종목</th><th class="text-end">수량</th><th class="text-end">가격</th><th>방식</th><th>결과</th></tr>
+                        </thead>
+                        <tbody id="hist-buy-attempts-tbody">
+                          <tr><td colspan="5" class="text-center text-muted">-</td></tr>
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                  <div class="col-md-6">
+                    <div class="d-flex justify-content-between align-items-center mb-1">
+                      <strong>매도 시도</strong>
+                      <span class="text-muted small" id="hist-sell-attempts-meta">-</span>
+                    </div>
+                    <div class="table-responsive">
+                      <table class="table table-sm table-dark table-hover align-middle mb-0">
+                        <thead class="table-secondary">
+                          <tr><th>종목</th><th class="text-end">수량</th><th class="text-end">가격</th><th>사유</th><th>결과</th></tr>
+                        </thead>
+                        <tbody id="hist-sell-attempts-tbody">
+                          <tr><td colspan="5" class="text-center text-muted">-</td></tr>
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div class="tab-pane fade" id="hist-tab-analysis" role="tabpanel">
+                <div class="row g-2">
+                  <div class="col-md-6">
+                    <div class="d-flex justify-content-between align-items-center mb-1">
+                      <strong>BUY 리스트(원본)</strong>
+                      <span class="text-muted small" id="hist-analysis-buy-meta">-</span>
+                    </div>
+                    <div class="table-responsive">
+                      <table class="table table-sm table-dark table-hover align-middle mb-0">
+                        <thead class="table-secondary">
+                          <tr><th>#</th><th>종목</th><th>거래소</th><th class="text-end">가격</th><th class="text-end">점수</th></tr>
+                        </thead>
+                        <tbody id="hist-analysis-buy-tbody">
+                          <tr><td colspan="5" class="text-center text-muted">-</td></tr>
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                  <div class="col-md-6">
+                    <div class="d-flex justify-content-between align-items-center mb-1">
+                      <strong>SELL 리스트(원본)</strong>
+                      <span class="text-muted small" id="hist-analysis-sell-meta">-</span>
+                    </div>
+                    <div class="table-responsive">
+                      <table class="table table-sm table-dark table-hover align-middle mb-0">
+                        <thead class="table-secondary">
+                          <tr><th>#</th><th>종목</th><th>거래소</th><th class="text-end">가격</th><th class="text-end">점수</th></tr>
+                        </thead>
+                        <tbody id="hist-analysis-sell-tbody">
+                          <tr><td colspan="5" class="text-center text-muted">-</td></tr>
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div class="tab-pane fade" id="hist-tab-skips" role="tabpanel">
+                <div class="row g-2">
+                  <div class="col-md-6">
+                    <strong>스킵(사유)</strong>
+                    <ul class="list-group list-group-flush mt-2" id="hist-skips-list">
+                      <li class="list-group-item bg-dark text-muted">-</li>
+                    </ul>
+                  </div>
+                  <div class="col-md-6">
+                    <strong>에러</strong>
+                    <ul class="list-group list-group-flush mt-2" id="hist-errors-list">
+                      <li class="list-group-item bg-dark text-muted">-</li>
+                    </ul>
+                    <div class="mt-3">
+                      <strong>제외된 매수 후보(사유)</strong>
+                      <div class="table-responsive mt-2">
+                        <table class="table table-sm table-dark table-hover align-middle mb-0">
+                          <thead class="table-secondary"><tr><th>종목</th><th>사유</th></tr></thead>
+                          <tbody id="hist-excluded-buy-tbody">
+                            <tr><td colspan="2" class="text-center text-muted">-</td></tr>
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div class="tab-pane fade" id="hist-tab-trace" role="tabpanel">
+                <div class="small text-muted mb-2">※ 분석서버 대기/환율 확보/호가 재시도 등 “실행 흐름”을 요약해서 보여줍니다.</div>
+                <div class="table-responsive">
+                  <table class="table table-sm table-dark table-hover align-middle mb-0">
+                    <thead class="table-secondary"><tr><th>시간</th><th>단계</th><th>정보</th></tr></thead>
+                    <tbody id="hist-trace-tbody">
+                      <tr><td colspan="3" class="text-center text-muted">-</td></tr>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+              <div class="tab-pane fade" id="hist-tab-raw" role="tabpanel">
+                <div class="small text-muted mb-2">원본(JSON)은 용량이 클 수 있어 일부 필드는 자동으로 축약될 수 있습니다.</div>
+                <pre class="mb-0" style="white-space:pre-wrap; max-height: 420px; overflow:auto;" id="hist-raw-json">-</pre>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="small text-muted mt-2" id="hist-detail-meta">-</div>
+      </div>
+      <div class="modal-footer border-secondary">
+        <button type="button" class="btn btn-outline-light" data-bs-dismiss="modal">닫기</button>
+      </div>
+    </div>
+  </div>
+</div>
 {% endblock %}
 
 

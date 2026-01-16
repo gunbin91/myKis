@@ -79,9 +79,12 @@
       </div>
     </div>
 
-    <div class="d-flex justify-content-between align-items-center mb-3">
+      <div class="d-flex justify-content-between align-items-center mb-3">
       <div class="text-muted">
         최근 체결/미체결 내역 (모의는 전체조회 제약이 있어 전체만 표시)
+        <div class="small text-muted mt-1" id="orders-mock-note" style="display:none;">
+          모의투자에서는 <strong>미체결내역(해외주식-005)</strong>이 미지원이라, <strong>체결내역(해외주식-007)</strong> 기반으로 근사 표시합니다.
+        </div>
       </div>
       <div class="d-flex gap-2">
         <button class="btn btn-sm btn-outline-warning" id="load-unfilled-btn">
@@ -146,6 +149,10 @@
   function getMode(){
     return fetch('/api/status').then(r=>r.json()).then(st=>{
       currentMode = st.status.mode;
+      try{
+        const note = document.getElementById('orders-mock-note');
+        if(note) note.style.display = (currentMode === 'mock') ? '' : 'none';
+      }catch(e){}
       try{
         if(window.CurrencyPref){
           window.CurrencyPref.storeFxFromBalance(st.balance || {});
@@ -291,6 +298,17 @@
         tbody.innerHTML = '<tr><td colspan="10" class="text-center text-muted py-4">조회 실패: '+(resp.message||'')+'</td></tr>';
         return;
       }
+      try{
+        const hint = document.getElementById('page-hint');
+        if(hint){
+          const src = (resp.source || '-').toString();
+          if(currentMode === 'mock' && src === 'v1_007_fallback'){
+            hint.textContent = '미체결(모의 근사): 해외주식-005 미지원 → 해외주식-007 기반';
+          }else{
+            hint.textContent = '미체결 소스: ' + src;
+          }
+        }
+      }catch(e){}
       const list = resp.data || [];
       if(list.length === 0){
         tbody.innerHTML = `<tr><td colspan="10" class="text-center text-muted py-4">미체결 내역 없음 (${resp.source})</td></tr>`;

@@ -85,6 +85,8 @@
 <script>
   const outEl = document.getElementById('api-out');
   const metaEl = document.getElementById('result-meta');
+  // 현재 서버 모드(mock/real). refreshModeBadge에서 갱신됨.
+  let _apiMode = 'mock';
 
   function _pretty(obj){
     try{ return JSON.stringify(obj, null, 2); }catch(e){ return String(obj); }
@@ -118,6 +120,7 @@
     try{
       const st = await getStatus();
       const mode = st?.status?.mode || 'mock';
+      _apiMode = mode;
       document.getElementById('api-test-server-badge').textContent = `mode: ${mode}`;
       document.getElementById('api-test-server-badge').className = 'badge ' + (mode === 'real' ? 'bg-danger' : 'bg-info text-dark');
       // 환율 캐시도 업데이트(원화/달러 토글과 같은 소스)
@@ -127,6 +130,8 @@
           window.CurrencyPref.syncCurrencyUi();
         }
       }catch(e){}
+      // 모드에 따라 (실전 전용) API 비활성/표시를 즉시 갱신
+      try{ _buildSelect(); updateApiForm(); }catch(e){}
     }catch(e){
       document.getElementById('api-test-server-badge').textContent = 'mode: (error)';
     }
@@ -177,6 +182,7 @@
       method: 'GET',
       path: '/api/test/foreign-margin',
       safe: true,
+      real_only: true,
       desc: 'KIS 해외주식-035 통합주문가능금액(itgr_ord_psbl_amt) 등',
       params: []
     },
@@ -198,9 +204,23 @@
       method: 'GET',
       path: '/api/quote/detail',
       safe: true,
+      real_only: true,
       desc: 'KIS v1_해외주식-029 현재가상세(모의 미지원)',
       params: [
         {name:'exchange', label:'거래소(Quote)', type:'select', default:'NAS', options:[{value:'NAS',label:'NAS'},{value:'NYS',label:'NYS'},{value:'AMS',label:'AMS'}]},
+        {name:'symbol', label:'종목', type:'text', default:'AAPL'},
+      ]
+    },
+    quote_product_info_034: {
+      group: '시세',
+      name: 'v1_034 - 상품기본정보(/api/quote/product-info) [실전]',
+      method: 'GET',
+      path: '/api/quote/product-info',
+      safe: true,
+      real_only: true,
+      desc: 'KIS v1_해외주식-034 상품기본정보(모의 미지원)',
+      params: [
+        {name:'exchange', label:'거래소(Order)', type:'select', default:'NASD', options:[{value:'NASD',label:'NASD'},{value:'NYSE',label:'NYSE'},{value:'AMEX',label:'AMEX'},{value:'SEHK',label:'SEHK'},{value:'TKSE',label:'TKSE'},{value:'SHAA',label:'SHAA'},{value:'SZAA',label:'SZAA'},{value:'HASE',label:'HASE'},{value:'VNSE',label:'VNSE'}]},
         {name:'symbol', label:'종목', type:'text', default:'AAPL'},
       ]
     },
@@ -210,6 +230,7 @@
       method: 'GET',
       path: '/api/test/quote/asking',
       safe: true,
+      real_only: true,
       desc: 'KIS 해외주식-033 현재가 호가(모의 미지원)',
       params: [
         {name:'exchange', label:'거래소(Quote)', type:'select', default:'NAS', options:[{value:'NAS',label:'NAS'},{value:'NYS',label:'NYS'},{value:'AMS',label:'AMS'}]},
@@ -222,14 +243,15 @@
       method: 'GET',
       path: '/api/account/buyable',
       safe: true,
-      desc: 'KIS v1_해외주식-014 매수가능금액/수량 조회',
+      desc: 'KIS v1_해외주식-014 매수가능금액/수량 조회 (티커→ITEM_CD 자동변환)',
       params: [
         {name:'exchange', label:'거래소(Order)', type:'select', default:'NASD', options:[
           {value:'NASD',label:'NASD'},{value:'NYSE',label:'NYSE'},{value:'AMEX',label:'AMEX'},
           {value:'SEHK',label:'SEHK'},{value:'TKSE',label:'TKSE'},{value:'SHAA',label:'SHAA'},{value:'SZAA',label:'SZAA'},{value:'HASE',label:'HASE'},{value:'VNSE',label:'VNSE'}
         ]},
-        {name:'symbol', label:'종목', type:'text', default:'AAPL'},
+        {name:'symbol', label:'종목(티커)', type:'text', default:'AAPL'},
         {name:'price', label:'가격(USD)', type:'number', default:'200', step:'0.01'},
+        {name:'debug', label:'debug(에러 상세)', type:'select', default:'1', options:[{value:'1',label:'on(1)'},{value:'0',label:'off(0)'}]},
       ]
     },
     order_history_007: {
@@ -276,6 +298,7 @@
       method: 'GET',
       path: '/api/test/period-profit/raw',
       safe: true,
+      real_only: true,
       desc: 'KIS v1_해외주식-032 원본 응답(실전 전용)',
       params: [
         {name:'start_date', label:'시작일(YYYYMMDD)', type:'text', default: getDefaultDate(-30)},
@@ -351,7 +374,10 @@
       for(const it of groups[g]){
         const o = document.createElement('option');
         o.value = it.key;
-        o.textContent = it.def.name;
+        const isRealOnly = !!it.def.real_only;
+        const isMock = (_apiMode === 'mock');
+        o.disabled = (isMock && isRealOnly);
+        o.textContent = it.def.name + ((isMock && isRealOnly) ? ' (모의 미지원)' : '');
         opt.appendChild(o);
       }
       sel.appendChild(opt);
@@ -430,6 +456,9 @@
     }
 
     descEl.textContent = def.desc || '-';
+    if((_apiMode === 'mock') && def.real_only){
+      descEl.textContent = (def.desc || '-') + ' (모의투자 미지원: 실전 모드에서만 호출 가능합니다)';
+    }
     for(const p of (def.params || [])){
       paramsBox.insertAdjacentHTML('beforeend', _inputHtml(p));
     }
@@ -443,7 +472,7 @@
 
     const isRisk = (def.safe === false);
     riskBox.style.display = isRisk ? 'block' : 'none';
-    runBtn.disabled = false;
+    runBtn.disabled = ((_apiMode === 'mock') && def.real_only) ? true : false;
     resetBtn.disabled = false;
     _syncRiskRunButton();
   }
@@ -491,6 +520,8 @@
       const qs = new URLSearchParams();
       // mode를 받는 엔드포인트들은 공통으로 mode 전달
       qs.set('mode', mode);
+      // 디버그 기본 ON
+      qs.set('debug', '1');
       for(const [k,v] of Object.entries(params)){
         if(v === undefined || v === null) continue;
         if((''+v).trim() === '') continue;
@@ -499,6 +530,8 @@
       url = url + '?' + qs.toString();
     }else{
       body = { ...params, mode };
+      // 디버그 기본 ON
+      body.debug = 1;
       if(def.safe === false){
         body.ack = document.getElementById('risk-ack')?.checked || false;
         body.confirm_text = (document.getElementById('risk-confirm-text')?.value || '').trim();

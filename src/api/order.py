@@ -2,14 +2,41 @@ import requests
 import json
 import time
 from datetime import datetime
+from decimal import Decimal, InvalidOperation, ROUND_DOWN
 from src.config.config_manager import config_manager
 from src.api.auth import kis_auth
 from src.utils.logger import logger, get_mode_logger
 from src.api.exchange import normalize_order_exchange
+from src.api.quote import kis_quote
 
 class KisOrder:
     def __init__(self):
         pass
+
+    def _format_ovrs_ord_unpr(self, price) -> str:
+        """
+        KIS 해외주식 단가(OVRS_ORD_UNPR) 포맷터.
+        - 스펙: (23.8) => 소수점 최대 8자리
+        - float -> str 변환 시 0.124999999999 / 1e-06 같은 형태가 나와
+          INVALID INPUT_FILED_SIZE(OPSQ2002)를 유발할 수 있어 Decimal 기반으로 강제 포맷한다.
+        """
+        try:
+            if price is None:
+                return "0.00000000"
+            # float을 직접 Decimal로 만들면 부동소수 오차가 들어가므로 str()을 거친다.
+            d = Decimal(str(price))
+            # 음수 가격은 비정상 -> 0으로 처리(방어)
+            if d < 0:
+                d = Decimal("0")
+            # 소수 8자리로 절사(ROUND_DOWN) 후 고정 소수점 문자열로 출력
+            q = Decimal("0.00000001")
+            d = d.quantize(q, rounding=ROUND_DOWN)
+            # 절대 지수표기 사용 안 함 + (중요) 8자리 고정 유지
+            # 일부 KIS 환경에서 (23.8) 포맷을 엄격하게 체크할 수 있어 trailing zero를 제거하지 않는다.
+            s = format(d, "f")
+            return s if s else "0.00000000"
+        except (InvalidOperation, ValueError, TypeError):
+            return "0.00000000"
 
     def _get_order_tr_id(self, exchange: str, side: str, mode: str) -> str:
         """
@@ -143,7 +170,7 @@ class KisOrder:
         # 초당 제한(EGW00201) 대응: 짧게 재시도
         for attempt in range(3):
             try:
-                res = requests.get(url, headers=headers, params=params)
+                res = requests.get(url, headers=headers, params=params, timeout=20)
                 if res.status_code == 200:
                     data = res.json()
                     if data.get('rt_cd') == '0':
@@ -223,7 +250,7 @@ class KisOrder:
         # 초당 제한(EGW00201) 대응: 짧게 재시도
         for attempt in range(3):
             try:
-                res = requests.get(url, headers=headers, params=params)
+                res = requests.get(url, headers=headers, params=params, timeout=20)
                 if res.status_code == 200:
                     data = res.json()
                     if data.get('rt_cd') == '0':
@@ -299,7 +326,7 @@ class KisOrder:
 
         for attempt in range(3):
             try:
-                res = requests.get(url, headers=headers, params=params, timeout=5)
+                res = requests.get(url, headers=headers, params=params, timeout=20)
                 if res.status_code == 200:
                     data = res.json()
                     if data.get("rt_cd") == "0":
@@ -369,7 +396,7 @@ class KisOrder:
         }
         
         try:
-            res = requests.get(url, headers=headers, params=params)
+            res = requests.get(url, headers=headers, params=params, timeout=20)
             if res.status_code == 200:
                 data = res.json()
                 if data['rt_cd'] == '0':
@@ -432,7 +459,7 @@ class KisOrder:
             "OVRS_EXCG_CD": normalize_order_exchange(exchange),
             "PDNO": symbol,
             "ORD_QTY": str(quantity),
-            "OVRS_ORD_UNPR": str(price),
+            "OVRS_ORD_UNPR": self._format_ovrs_ord_unpr(price),
             "ORD_SVR_DVSN_CD": "0",
             "ORD_DVSN": order_type
         }
@@ -441,7 +468,7 @@ class KisOrder:
         for attempt in range(3):
             try:
                 log.info(f"[Order] 주문 요청: {side} {symbol} {quantity}주 @ {price} ({order_type})")
-                res = requests.post(url, headers=headers, data=json.dumps(body))
+                res = requests.post(url, headers=headers, data=json.dumps(body), timeout=20)
 
                 if res.status_code == 200:
                     data = res.json()
@@ -510,6 +537,8 @@ class KisOrder:
             "appkey": app_key,
             "appsecret": app_secret,
             "tr_id": tr_id,
+            # 가이드상 선택이지만, VTS/모의에서 누락 시 오류가 날 수 있어 개인계좌 기준 P 고정
+            "custtype": "P",
         }
 
         rvse_cncl = "01" if action == "revise" else "02"
@@ -522,12 +551,12 @@ class KisOrder:
             "ORGN_ODNO": str(origin_order_no),
             "RVSE_CNCL_DVSN_CD": rvse_cncl,
             "ORD_QTY": str(int(qty)),
-            "OVRS_ORD_UNPR": str(price),
+            "OVRS_ORD_UNPR": self._format_ovrs_ord_unpr(price),
             "ORD_SVR_DVSN_CD": "0",
         }
 
         try:
-            res = requests.post(url, headers=headers, data=json.dumps(body))
+            res = requests.post(url, headers=headers, data=json.dumps(body), timeout=20)
             if res.status_code != 200:
                 log.error(f"[Order] 정정/취소 API 호출 오류: {res.status_code} - {res.text}")
                 return None
@@ -547,6 +576,7 @@ class KisOrder:
         symbol: str,
         price: float,
         mode: str | None = None,
+        debug: bool = False,
     ):
         """
         해외주식 매수가능금액조회 (v1_해외주식-014)
@@ -576,21 +606,79 @@ class KisOrder:
             "appkey": app_key,
             "appsecret": app_secret,
             "tr_id": tr_id,
+            # 가이드상 선택이지만, VTS/모의에서 누락 시 오류가 날 수 있어 개인계좌 기준 P 고정
+            "custtype": "P",
         }
+
+        item_cd_source = None
+
+        def _build_debug_request(params_override=None):
+            # params_override가 없으면 실제 요청 params를 사용
+            params_view = (params_override if params_override is not None else params).copy()
+            return {
+                "url": url,
+                "headers": {
+                    "content-type": headers.get("content-type"),
+                    "authorization": "Bearer **redacted**" if headers.get("authorization") else None,
+                    "appkey": headers.get("appkey"),
+                    "appsecret": "****" if headers.get("appsecret") else None,
+                    "tr_id": headers.get("tr_id"),
+                    "custtype": headers.get("custtype"),
+                },
+                "params": params_view,
+                "param_lens": {k: len(str(v)) for k, v in params_view.items()},
+                "input_symbol": symbol,
+                "item_cd_source": item_cd_source,
+            }
+
+        def _debug_error(msg_cd=None, msg1=None, http_status=None, detail=None, params_override=None):
+            if not debug:
+                return None
+            err = {
+                "msg_cd": msg_cd,
+                "msg1": msg1,
+                "http_status": http_status,
+                "request": _build_debug_request(params_override=params_override),
+            }
+            if detail:
+                err["detail"] = detail
+            return {"_error": err}
+
+        if mode == "real":
+            item_cd_source = "v1_034"
+            item_cd = kis_quote.get_std_pdno(exchange=exchange, symbol=symbol, mode=mode)
+        else:
+            # 모의는 ITEM_CD를 직접 받는 형태로 처리(엔진에서는 v1_014 스킵)
+            item_cd_source = "direct"
+            item_cd = str(symbol).strip().upper()
+        if not item_cd:
+            log.error(f"[Order] ITEM_CD 매핑 실패: symbol={symbol}, exchange={exchange}")
+            return _debug_error(
+                msg_cd="ITEM_CD_NOT_FOUND",
+                msg1="ITEM_CD mapping failed",
+                detail={"symbol": symbol, "exchange": exchange, "url": url},
+                params_override={
+                    "CANO": cano,
+                    "ACNT_PRDT_CD": acnt_prdt_cd,
+                    "OVRS_EXCG_CD": normalize_order_exchange(exchange),
+                    "OVRS_ORD_UNPR": self._format_ovrs_ord_unpr(price),
+                    "ITEM_CD": symbol,
+                },
+            ) or None
 
         params = {
             "CANO": cano,
             "ACNT_PRDT_CD": acnt_prdt_cd,
             "OVRS_EXCG_CD": normalize_order_exchange(exchange),
-            "OVRS_ORD_UNPR": str(price),
-            "ITEM_CD": symbol,
+            "OVRS_ORD_UNPR": self._format_ovrs_ord_unpr(price),
+            "ITEM_CD": item_cd,
         }
 
         # 초당 제한(EGW00201) 대응: 짧게 재시도
         # - 엔진에서 "2회 재시도 후 스킵" 정책을 쓰므로, 여기서도 2회까지만 재시도한다.
         for attempt in range(2):
             try:
-                res = requests.get(url, headers=headers, params=params)
+                res = requests.get(url, headers=headers, params=params, timeout=20)
                 if res.status_code == 200:
                     data = res.json()
                     if data.get("rt_cd") == "0":
@@ -598,8 +686,20 @@ class KisOrder:
                     if data.get("msg_cd") == "EGW00201":
                         time.sleep(0.3 * (attempt + 1))
                         continue
-                    log.error(f"[Order] 매수가능금액조회 실패: {data.get('msg1')} ({data.get('msg_cd')})")
-                    return None
+                    # OPSQ2002 등 필드 규격 오류는 원인 파악을 돕기 위해 '민감정보 제외'한 요청 파라미터를 함께 기록한다.
+                    try:
+                        if str(data.get("msg_cd") or "").strip().upper() in ("OPSQ2002",):
+                            px = params.get("OVRS_ORD_UNPR")
+                            log.error(
+                                f"[Order] 매수가능금액조회 실패: {data.get('msg1')} ({data.get('msg_cd')}) "
+                                f"[debug: OVRS_EXCG_CD={params.get('OVRS_EXCG_CD')}, ITEM_CD={params.get('ITEM_CD')}, "
+                                f"OVRS_ORD_UNPR={px} (len={len(str(px))})]"
+                            )
+                        else:
+                            log.error(f"[Order] 매수가능금액조회 실패: {data.get('msg1')} ({data.get('msg_cd')})")
+                    except Exception:
+                        log.error(f"[Order] 매수가능금액조회 실패: {data.get('msg1')} ({data.get('msg_cd')})")
+                    return _debug_error(msg_cd=data.get("msg_cd"), msg1=data.get("msg1"), http_status=200) or None
 
                 if res.status_code == 500:
                     try:
@@ -607,17 +707,18 @@ class KisOrder:
                         if data.get("msg_cd") == "EGW00201":
                             time.sleep(0.3 * (attempt + 1))
                             continue
+                        return _debug_error(msg_cd=data.get("msg_cd"), msg1=data.get("msg1"), http_status=500) or None
                     except Exception:
                         pass
 
                 log.error(f"[Order] 매수가능금액조회 API 호출 오류: {res.status_code} - {res.text}")
-                return None
+                return _debug_error(http_status=res.status_code, detail=res.text) or None
             except Exception as e:
                 if attempt < 1:
                     time.sleep(0.3 * (attempt + 1))
                     continue
                 log.error(f"[Order] 매수가능금액조회 중 예외 발생: {e}")
-                return None
+                return _debug_error(detail=str(e)) or None
 
     def get_order_history(
         self,
@@ -703,7 +804,7 @@ class KisOrder:
                 # 초당 제한(EGW00201) 발생 시 짧게 재시도
                 data = None
                 for attempt in range(3):
-                    res = requests.get(url, headers=headers, params=params)
+                    res = requests.get(url, headers=headers, params=params, timeout=20)
                     if res.status_code == 500:
                         # 초당 제한은 500으로 내려오는 케이스가 많음
                         try:
@@ -827,7 +928,7 @@ class KisOrder:
             }
 
             try:
-                res = requests.get(url, headers=headers, params=params)
+                res = requests.get(url, headers=headers, params=params, timeout=20)
                 if res.status_code != 200:
                     log.error(f"[Order] 기간손익 API 호출 오류: {res.status_code} - {res.text}")
                     return None

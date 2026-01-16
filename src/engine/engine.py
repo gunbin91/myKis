@@ -5,10 +5,13 @@ from zoneinfo import ZoneInfo
 from src.config.config_manager import config_manager
 from src.api.order import kis_order
 from src.api.quote import kis_quote
+from src.api.auth import kis_auth
 from src.utils.logger import logger, get_mode_logger
 from src.utils.fx_rate import get_usd_krw_rate
 from src.engine.position_store import PositionStore
 from src.engine.run_state_store import RunStateStore
+from src.engine.execution_history_store import ExecutionHistoryStore
+from uuid import uuid4
 
 class TradingEngine:
     def __init__(self):
@@ -39,6 +42,90 @@ class TradingEngine:
         # 프로세스 재시작에도 중복 실행 방지되도록 파일에도 저장
         self._last_scheduled_run_day[mode] = day
         self._get_run_state_store(mode).set_last_scheduled_run_day(day)
+
+    def _wait_for_token(self, mode: str, timeout_sec: int = 70, poll_sec: int = 10) -> bool:
+        """
+        (B) 실행 시작 시 토큰을 확보할 때까지 제한시간 내 재시도.
+        - kis_auth.get_token()은 EGW00133 대응(프로세스 간 쿨다운/락) 때문에 None을 반환할 수 있어,
+          엔진 실행은 여기서 기다린 후 진행한다.
+        """
+        log = get_mode_logger(mode)
+        try:
+            timeout_sec = int(timeout_sec or 0)
+        except Exception:
+            timeout_sec = 0
+        if timeout_sec <= 0:
+            timeout_sec = 70
+        try:
+            poll_sec = int(poll_sec or 0)
+        except Exception:
+            poll_sec = 0
+        if poll_sec <= 0:
+            poll_sec = 10
+
+        deadline = datetime.now() + timedelta(seconds=timeout_sec)
+        first = True
+        while datetime.now() <= deadline:
+            try:
+                token = kis_auth.get_token(mode)
+                if token:
+                    return True
+            except Exception:
+                pass
+            if first:
+                log.warning(f"[Engine] 토큰 확보 대기 중... (최대 {timeout_sec}s)")
+                first = False
+            time_module.sleep(poll_sec)
+        log.error(f"[Engine] 토큰 확보 실패(시간 초과): timeout={timeout_sec}s")
+        return False
+
+    def _wait_for_fx_rate(self, *, mode: str, timeout_sec: int = 60, poll_sec: int = 5):
+        """
+        환율(USD/KRW)을 확보할 때까지 제한시간 내 재시도.
+        - 웹(/api/status)은 v1_008 present를 먼저 조회한 뒤 fx에 주입하므로 안정적인 편.
+        - 자동매매 프로세스는 순간적인 토큰/네트워크 이슈로 v1_008이 실패할 수 있어, 여기서 기다린 후 진행한다.
+        - 실패 시 FxRateResult(rate=None, ...) 형태를 반환할 수 있다.
+        """
+        log = get_mode_logger(mode)
+        try:
+            timeout_sec = int(timeout_sec or 0)
+        except Exception:
+            timeout_sec = 0
+        if timeout_sec <= 0:
+            timeout_sec = 60
+        try:
+            poll_sec = int(poll_sec or 0)
+        except Exception:
+            poll_sec = 0
+        if poll_sec <= 0:
+            poll_sec = 5
+
+        deadline = datetime.now() + timedelta(seconds=timeout_sec)
+        first = True
+        last_fx = None
+        while datetime.now() <= deadline:
+            try:
+                present = kis_order.get_present_balance(
+                    natn_cd="000",
+                    tr_mket_cd="00",
+                    inqr_dvsn_cd="00",
+                    wcrc_frcr_dvsn_cd="02",
+                    mode=mode,
+                )
+                fx = get_usd_krw_rate(mode=mode, kis_present=(present or {}))
+                last_fx = fx
+                if fx and fx.rate and fx.rate > 0:
+                    return fx
+            except Exception:
+                pass
+            if first:
+                log.warning(f"[Engine] USD/KRW 환율 확보 대기 중... (최대 {timeout_sec}s)")
+                first = False
+            time_module.sleep(poll_sec)
+        if last_fx is not None:
+            return last_fx
+        # 최후 폴백: 기존 동작 유지(내부에서 KIS→FDR 1회)
+        return get_usd_krw_rate(mode=mode)
 
     def is_market_open(self):
         """
@@ -76,13 +163,20 @@ class TradingEngine:
 
         return True
 
-    def get_analysis_data(self):
+    def get_analysis_data(self, trace_cb=None):
         """
         분석 서버에서 매수/매도 리스트 가져오기
         - 요구사항: 분석서버의 '실시간 분석 실행'을 호출한 뒤 결과를 받는다.
           (분석서버 구현체에 따라 /api/start_analysis 또는 /v1/analysis/run)
         - 결과 폴링: /v1/analysis 또는 /v1/analysis/result (서버별 상이) 지원
         """
+        def _trace(step: str, **meta):
+            try:
+                if callable(trace_cb):
+                    trace_cb(step=step, **(meta or {}))
+            except Exception:
+                pass
+
         host = config_manager.get("common.analysis_host", "localhost")
         port = config_manager.get("common.analysis_port", 5500)
         base_url = f"http://{host}:{int(port)}" if (host and port) else None
@@ -104,6 +198,7 @@ class TradingEngine:
 
         if mock_enabled:
             # 설정파일에 없더라도 코드에서 안전하게 토글 가능
+            _trace("analysis.mock_enabled")
             return {
                 "buy": [{"code": "TSLA", "exchange": "NAS"}],
                 "sell": []
@@ -152,7 +247,6 @@ class TradingEngine:
                         "analysis_date": data.get("analysis_date"),
                         "total_stocks": data.get("total_stocks"),
                         "top_stocks": rows[:20] if isinstance(rows, list) else rows,
-                        "raw": payload,
                     },
                 }
 
@@ -213,6 +307,7 @@ class TradingEngine:
             return None
 
         try:
+            _trace("analysis.start", base_url=base_url)
             analysis_date = datetime.now().strftime("%Y-%m-%d")
 
             # 실제로 존재하는 result 엔드포인트를 먼저 선택한다.
@@ -318,10 +413,14 @@ class TradingEngine:
 
             # 2) 결과 폴링: 핵심은 analysis_running이 true였다가 false로 떨어지는 순간을 "완료"로 본다.
             if not chosen_result_url:
+                _trace("analysis.no_result_url")
                 return {"buy": [], "sell": []}
 
             seen_running = False
             stable_success_cnt = 0
+            _trace("analysis.poll.start", url=chosen_result_url)
+            poll_started = datetime.now()
+            last_trace_sec = -999999.0
             for _ in range(600):  # 20분(2초 * 600)
                 try:
                     rr = requests.get(chosen_result_url, timeout=3)
@@ -346,12 +445,27 @@ class TradingEngine:
 
                     if running:
                         seen_running = True
+                        # 너무 잦은 trace 방지(30초 단위)
+                        try:
+                            elapsed = (datetime.now() - poll_started).total_seconds()
+                            if (elapsed - last_trace_sec) >= 30:
+                                last_trace_sec = elapsed
+                                _trace("analysis.poll.waiting", elapsed_sec=int(elapsed))
+                        except Exception:
+                            pass
                         time_module.sleep(2)
                         continue
 
                     out = _normalize_payload_to_buy_sell(payload)
                     if out is None:
                         # 포맷이 예상과 다르면 잠시 대기 후 재시도
+                        try:
+                            elapsed = (datetime.now() - poll_started).total_seconds()
+                            if (elapsed - last_trace_sec) >= 30:
+                                last_trace_sec = elapsed
+                                _trace("analysis.poll.unexpected_format", elapsed_sec=int(elapsed))
+                        except Exception:
+                            pass
                         time_module.sleep(2)
                         continue
 
@@ -376,10 +490,20 @@ class TradingEngine:
                     # - 또는 baseline 대비 결과가 바뀐 것으로 판단되거나(date_changed)
                     # - 또는 start_ok인데 결과를 2회 연속 성공적으로 읽었으면(실행이 빠르게 끝난 케이스)
                     if seen_running or date_changed:
+                        try:
+                            elapsed = (datetime.now() - poll_started).total_seconds()
+                        except Exception:
+                            elapsed = None
+                        _trace("analysis.poll.done", elapsed_sec=int(elapsed) if elapsed is not None else None, seen_running=seen_running, date_changed=date_changed)
                         return out
 
                     stable_success_cnt += 1
                     if start_ok and stable_success_cnt >= 2:
+                        try:
+                            elapsed = (datetime.now() - poll_started).total_seconds()
+                        except Exception:
+                            elapsed = None
+                        _trace("analysis.poll.done", elapsed_sec=int(elapsed) if elapsed is not None else None, stable_success_cnt=stable_success_cnt)
                         return out
 
                 except Exception:
@@ -387,9 +511,11 @@ class TradingEngine:
 
                 time_module.sleep(2)
 
+            _trace("analysis.poll.timeout")
             return {"buy": [], "sell": []}
         except Exception as e:
             logger.warning(f"[Engine] 분석 서버 연결 실패: {e}")
+            _trace("analysis.exception", error=str(e))
             return {"buy": [], "sell": []}
 
     def _run_core(self, mode: str, analysis_data: dict | None, ignore_auto_enabled: bool):
@@ -399,6 +525,39 @@ class TradingEngine:
             return
 
         log = get_mode_logger(mode)
+        # 실행 이력(상세) 수집: 실패/예외 포함해서 1회 실행 단위로 저장한다.
+        run_id = str(uuid4())
+        started_at = datetime.now().isoformat(timespec="seconds")
+        history: dict = {
+            "run_id": run_id,
+            "mode": mode,
+            "run_type": "manual" if ignore_auto_enabled else "scheduled",
+            "started_at": started_at,
+            "finished_at": None,
+            "status": "unknown",  # success|partial|no_trade|error
+            "message": None,
+            "analysis": None,  # 원본(요약 포함)
+            "analysis_buy": [],
+            "analysis_sell": [],
+            "sell_attempts": [],
+            "buy_attempts": [],
+            "skips": [],  # {"side":"buy/sell","symbol":..,"reason":..}
+            "errors": [],
+            # 사용자 친화적 표시(해외주식 운영): 실행 당시 스냅샷/단계 trace/제외사유
+            "snapshot": {},
+            "trace": [],
+            "excluded": {"buy": [], "sell": []},
+        }
+
+        def _trace(step: str, **meta):
+            try:
+                history["trace"].append({
+                    "ts": datetime.now().isoformat(timespec="seconds"),
+                    "step": step,
+                    **(meta or {}),
+                })
+            except Exception:
+                pass
         strategy = config_manager.get(f'{mode}.strategy', {})
         auto_enabled = config_manager.get(f'{mode}.auto_trading_enabled', False)
         schedule_time = config_manager.get(f"{mode}.schedule_time", "00:00") or "00:00"
@@ -439,9 +598,14 @@ class TradingEngine:
         self.last_run_at = datetime.now()
         self.last_error = None
         try:
-            # 오늘 실행으로 마킹(실패해도 1일 1회 원칙 유지)
-            if (not ignore_auto_enabled):
-                self._mark_scheduled_run_day(mode, datetime.now().strftime("%Y%m%d"))
+            # (B) 자동매매는 토큰 확보 후 진행 (토큰 발급 제한(EGW00133) 대응)
+            if not self._wait_for_token(mode=mode, timeout_sec=70, poll_sec=10):
+                self.last_error = "token_issue_timeout"
+                history["status"] = "error"
+                history["message"] = "토큰 확보 실패(시간 초과)"
+                _trace("token.wait.timeout")
+                return
+            _trace("token.ready")
             
             # 전략 파라미터 로드
             try:
@@ -463,23 +627,68 @@ class TradingEngine:
             # reserve_cash: 구버전(USD) 하위호환
             reserve_cash_krw = float(strategy.get("reserve_cash_krw", 0) or 0.0)
             reserve_cash_usd_legacy = float(strategy.get("reserve_cash", 0) or 0.0)
-            # USD/KRW 환율(원/달러): 사용자 입력/설정값은 사용하지 않고, KIS → FinanceDataReader 순으로 자동 조회
-            fx = get_usd_krw_rate(mode=mode)
+            # USD/KRW 환율(원/달러): 토큰처럼 "확보 후 진행"이 더 안전하다.
+            # - reserve_cash_krw를 사용(>0)하는 경우에만 환율 확보를 기다린다.
+            if reserve_cash_krw > 0:
+                fx = self._wait_for_fx_rate(mode=mode, timeout_sec=60, poll_sec=5)
+            else:
+                fx = get_usd_krw_rate(mode=mode)
             usd_krw_rate = fx.rate or 0.0
             usd_krw_rate_source = fx.source
-            reserve_cash = (reserve_cash_krw / usd_krw_rate) if reserve_cash_krw > 0 else reserve_cash_usd_legacy
+            usd_krw_rate_error = getattr(fx, "error", None)
+
+            # 환율 자동조회가 실패하면 "매수는 취소, 매도만 실행" 정책 적용
+            # (주의) 환율 실패(0/None) 상태에서 reserve_cash_krw/usd_krw_rate를 먼저 계산하면 0나누기 예외로 프로세스가 죽는다.
+            allow_buy = True
+            if usd_krw_rate <= 0:
+                allow_buy = False
+                history["errors"].append(f"fx_rate_unavailable: source={usd_krw_rate_source}, error={usd_krw_rate_error}")
+                _trace("fx.unavailable", source=usd_krw_rate_source, error=usd_krw_rate_error)
+            else:
+                _trace("fx.ready", usd_krw_rate=usd_krw_rate, source=usd_krw_rate_source)
+
+            # reserve_cash 계산(USD): 환율이 유효할 때만 KRW→USD 변환
+            if reserve_cash_krw > 0:
+                if usd_krw_rate > 0:
+                    reserve_cash = (reserve_cash_krw / usd_krw_rate)
+                else:
+                    # 환율이 없으면 매수는 스킵되므로 reserve_cash는 0(또는 legacy)로 안전하게 둔다.
+                    reserve_cash = reserve_cash_usd_legacy if reserve_cash_usd_legacy > 0 else 0.0
+            else:
+                reserve_cash = reserve_cash_usd_legacy
             max_hold_days = int(strategy.get("max_hold_days", 0) or 0)
             # 시장가에 가깝게 체결시키기 위한 슬리피지(%) - 지정가만 사용하는 구조에서 체결률을 높이기 위함
             slippage_pct = float(strategy.get("slippage_pct", 0.5) or 0.5)
             
             log.info(f"=== 자동매매 엔진 실행 시작 ({mode} 모드) ===")
             log.info(f"전략: top_n={top_n}, reserve_cash_usd≈${reserve_cash:.2f} (reserve_cash_krw={reserve_cash_krw:.0f}, usd_krw_rate={usd_krw_rate} [{usd_krw_rate_source}]), 익절 {take_profit_pct}%, 손절 {stop_loss_pct}%")
+            if not allow_buy:
+                log.warning(f"[Engine] USD/KRW 환율 자동조회 실패 → 매수는 취소(스킵)하고 매도 조건만 실행합니다. source={usd_krw_rate_source}, error={usd_krw_rate_error}")
 
-            # 환율 자동조회가 실패하면 "매수는 취소, 매도만 실행" 정책 적용
-            allow_buy = True
-            if usd_krw_rate <= 0:
-                allow_buy = False
-                log.warning("[Engine] USD/KRW 환율 자동조회 실패(KIS+FinanceDataReader). 매수는 취소(스킵)하고 매도 조건만 실행합니다.")
+            # 실행 스냅샷(해외주식 기준: USD 예산/환율/주문방식이 핵심)
+            history["snapshot"] = {
+                "mode": mode,
+                "schedule_time": schedule_time,
+                "strategy": {
+                    "top_n": top_n,
+                    "take_profit_pct": take_profit_pct,
+                    "stop_loss_pct": stop_loss_pct,
+                    "max_hold_days": max_hold_days,
+                    "slippage_pct": slippage_pct,
+                    "reserve_cash_krw": reserve_cash_krw,
+                    "reserve_cash_usd": reserve_cash,
+                    "buy_order_method": (strategy.get("buy_order_method") or ("limit_ask_ladder" if mode == "real" else "limit_slippage")).strip(),
+                    "limit_buy_max_premium_pct": float(strategy.get("limit_buy_max_premium_pct", 1.0) or 1.0),
+                    "limit_buy_max_levels": int(strategy.get("limit_buy_max_levels", 5) or 5),
+                    "limit_buy_step_wait_sec": float(strategy.get("limit_buy_step_wait_sec", 1.0) or 1.0),
+                },
+                "fx": {
+                    "usd_krw_rate": usd_krw_rate,
+                    "source": usd_krw_rate_source,
+                    "error": usd_krw_rate_error,
+                    "allow_buy": allow_buy,
+                },
+            }
 
             # 1. 거래 가능 시간 체크
             if not self.is_market_open():
@@ -491,7 +700,9 @@ class TradingEngine:
             if not balance_info:
                 log.error("[Engine] 잔고 조회 실패로 중단")
                 self.is_running = False
+                _trace("balance.failed")
                 return
+            _trace("balance.ok")
 
             output1 = balance_info.get('output1', [])
             # 보유 종목 정보 파싱
@@ -502,7 +713,14 @@ class TradingEngine:
                 if not stock['ovrs_pdno']: continue
                 
                 symbol = stock['ovrs_pdno']
-                qty = int(stock['ovrs_cblc_qty'])
+                try:
+                    qty = int(float(stock.get('ovrs_cblc_qty') or 0))
+                except Exception:
+                    qty = 0
+                try:
+                    ord_psbl_qty = int(float(stock.get('ord_psbl_qty') or 0))
+                except Exception:
+                    ord_psbl_qty = 0
                 profit_rate = float(stock['evlu_pfls_rt'])
                 exch = stock.get("ovrs_excg_cd") or "NASD"
                 
@@ -510,6 +728,7 @@ class TradingEngine:
                     held_symbols.append(symbol)
                     my_stocks[symbol] = {
                         'qty': qty,
+                        'ord_psbl_qty': ord_psbl_qty,
                         'profit_rate': profit_rate,
                         'name': stock['ovrs_item_name'],
                         'exchange': exch,
@@ -624,46 +843,192 @@ class TradingEngine:
 
             # 3. 분석 데이터 수신 (즉시실행/미리보기에서 전달되면 그것을 사용)
             if analysis_data is None:
-                analysis_data = self.get_analysis_data()
-            buy_list = analysis_data.get('buy', [])
-            sell_list = analysis_data.get('sell', [])
+                _trace("analysis.fetch.start")
+                analysis_data = self.get_analysis_data(trace_cb=_trace)
+            history["analysis"] = analysis_data
+            buy_list = analysis_data.get('buy', []) if isinstance(analysis_data, dict) else []
+            # 정책(B안): 분석서버의 sell 리스트 기반 "자동 매도" 기능은 사용하지 않음(혼동/오주문 리스크).
+            # - 분석은 매수 후보 생성에만 사용한다.
+            # - sell이 내려오더라도 무시하며, UI/이력에서도 sell 리스트를 비워서 혼동을 막는다.
+            sell_list = []
+            history["analysis_buy"] = buy_list if isinstance(buy_list, list) else [buy_list]
+            history["analysis_sell"] = []
             
-            log.info(f"[Engine] 분석 데이터 - Buy: {len(buy_list)}, Sell: {len(sell_list)}")
+            log.info(f"[Engine] 분석 데이터 - Buy: {len(buy_list)}, Sell: 0 (sell list ignored)")
+            _trace("analysis.fetch.done", buy=len(buy_list), sell=0, sell_ignored=True)
 
-            # 4. 매도 실행 (전략 매도 + 분석 매도)
+            # (C) '오늘 실행 마킹'은 핵심 사전조건(시장 오픈 + 잔고 조회 + 분석 수신) 이후에 수행
+            # - 토큰만 확보한 상태에서 실패하면 "오늘 실행됨"으로 기록되어 하루가 통째로 스킵될 수 있어 위험.
+            if (not ignore_auto_enabled):
+                self._mark_scheduled_run_day(mode, datetime.now().strftime("%Y%m%d"))
+                _trace("run_day.marked")
+
+            # run 내부 중복 방지용 상태
+            sold_symbols: set[str] = set()
+            # 실전에서만 사용: 미체결 선취소를 위한 exchange별 캐시(과도한 v1_005 호출 방지)
+            _unfilled_cache: dict[str, list[dict]] = {}
+
+            def _get_unfilled_cached(ex: str) -> list[dict]:
+                ex2 = (ex or "NASD").strip().upper()
+                if mode != "real":
+                    return []
+                if ex2 in _unfilled_cache:
+                    return _unfilled_cache[ex2]
+                rows = kis_order.get_unfilled_orders(exchange=ex2, mode=mode) or []
+                rows = rows if isinstance(rows, list) else [rows]
+                _unfilled_cache[ex2] = rows
+                return rows
+
+            def _cancel_unfilled_for_symbol(ex: str, sym: str, *, side_filter: str | None = None) -> int:
+                """
+                실전: 특정 종목의 미체결 주문을 선취소하여 다음 주문(특히 매수)을 확보한다.
+                - side_filter: "buy"|"sell"|None
+                - 주의: 자동매매가 사용자 수동주문을 취소할 수 있으므로, 티커 단위로만 제한한다.
+                """
+                if mode != "real":
+                    return 0
+                ex2 = (ex or "NASD").strip().upper()
+                sym2 = (sym or "").strip().upper()
+                if not sym2:
+                    return 0
+                try:
+                    rows = _get_unfilled_cached(ex2)
+                except Exception:
+                    return 0
+                cancelled = 0
+                for r in (rows or []):
+                    if not isinstance(r, dict):
+                        continue
+                    rsym = (r.get("pdno") or r.get("PDNO") or r.get("ovrs_pdno") or "").strip().upper()
+                    if rsym != sym2:
+                        continue
+                    side_cd = str(r.get("sll_buy_dvsn_cd") or r.get("SLL_BUY_DVSN_CD") or r.get("sll_buy_dvsn") or "").strip().lower()
+                    if side_filter == "buy":
+                        if side_cd and side_cd not in ("02", "buy"):
+                            continue
+                    if side_filter == "sell":
+                        if side_cd and side_cd not in ("01", "sell"):
+                            continue
+                    odno = str(r.get("odno") or r.get("ODNO") or "").strip()
+                    if not odno:
+                        continue
+                    try:
+                        nccs = int(float(str(r.get("nccs_qty") or r.get("NCCS_QTY") or 0).replace(",", "")))
+                    except Exception:
+                        nccs = 0
+                    if nccs <= 0:
+                        continue
+
+                    _trace("unfilled.cancel.try", exchange=ex2, symbol=sym2, order_no=odno, qty=nccs, side=side_cd)
+                    cncl = kis_order.revise_cancel_order(
+                        exchange=ex2,
+                        symbol=sym2,
+                        origin_order_no=odno,
+                        qty=int(nccs),
+                        price=0,
+                        action="cancel",
+                        mode=mode,
+                    )
+                    _trace("unfilled.cancel.done", exchange=ex2, symbol=sym2, order_no=odno, ok=bool(cncl))
+                    if cncl:
+                        cancelled += 1
+                return cancelled
+
+            # 4. 매도 실행 (전략 매도)
             # 4-1. 익절/손절 감시
             sell_orders_sent = 0
             for symbol, info in my_stocks.items():
                 profit_rate = info['profit_rate']
-                qty = info['qty']
+                qty = info.get('ord_psbl_qty', 0)
+                exchange = info.get("exchange", "NASD")
+
+                # 런 내부 중복 매도 방지 + 장중 손절 감시(StopWatch)와의 충돌 방지(공통 쿨다운)
+                try:
+                    symu = (symbol or "").strip().upper()
+                    if symu in sold_symbols:
+                        history["skips"].append({"side": "sell", "symbol": symu, "reason": "already_sold_in_run"})
+                        continue
+                    now_dt = datetime.now()
+                    last_sw = self._stop_loss_cooldown.get(symu)
+                    if last_sw and (now_dt - last_sw) < timedelta(minutes=5):
+                        history["skips"].append({"side": "sell", "symbol": symu, "reason": "sell_cooldown_recent"})
+                        continue
+                except Exception:
+                    pass
+
+                # 주문가능수량이 0이면 매도 시도하지 않는다(모의/실전 공통 안전)
+                if qty <= 0:
+                    history["skips"].append({"side": "sell", "symbol": symu, "reason": "sell_qty_unavailable"})
+                    continue
                 
                 # 익절 조건
                 if profit_rate >= take_profit_pct:
                     log.info(f"[Engine] 익절 조건 만족: {symbol} ({profit_rate}% >= {take_profit_pct}%)")
                     # 지정가(현재가 근사)로 매도 (price=0은 지정가에서 실패 가능)
-                    px = kis_quote.get_current_price(info.get("exchange","NASD"), symbol, mode=mode) or {}
+                    # 매도 전: 동일 종목 미체결 매도/매수 주문이 있으면 충돌/중복을 줄이기 위해 선취소(실전)
+                    try:
+                        _cancel_unfilled_for_symbol(exchange, symbol)
+                    except Exception:
+                        pass
+                    px = kis_quote.get_current_price(exchange, symbol, mode=mode) or {}
                     sell_price = float(px.get("last", 0) or 0)
                     if sell_price <= 0:
                         log.warning(f"[Engine] {symbol} 매도가 산출 실패(현재가 0)로 익절 매도 스킵")
+                        history["skips"].append({"side": "sell", "symbol": symbol, "reason": "take_profit_price_unavailable"})
                     else:
                         # 매도는 체결 우선 -> 현재가 대비 소폭 낮게
                         sell_price = sell_price * (1.0 - (slippage_pct / 100.0))
-                        kis_order.order(symbol, qty, sell_price, 'sell', exchange=info.get("exchange","NASD"), order_type='00', mode=mode)
+                        out = kis_order.order(symbol, qty, sell_price, 'sell', exchange=exchange, order_type='00', mode=mode)
+                        history["sell_attempts"].append({
+                            "symbol": symbol,
+                            "exchange": exchange,
+                            "qty": qty,
+                            "price": sell_price,
+                            "reason": "take_profit",
+                            "order_no": (out or {}).get("ODNO") or (out or {}).get("odno"),
+                            "ok": bool(out),
+                        })
                         sell_orders_sent += 1
+                        try:
+                            if out:
+                                sold_symbols.add((symbol or "").strip().upper())
+                                self._stop_loss_cooldown[(symbol or "").strip().upper()] = datetime.now()
+                        except Exception:
+                            pass
                     # 매도했으므로 my_stocks에서 제거해야 중복 매도 방지되나, API 호출 텀이 있으므로 생략
                     continue
                     
                 # 손절 조건: 입력값 그대로 비교 (stop_loss_pct는 보통 음수)
                 if profit_rate <= stop_loss_pct:
                     log.info(f"[Engine] 손절 조건 만족: {symbol} ({profit_rate}% <= {stop_loss_pct}%)")
-                    px = kis_quote.get_current_price(info.get("exchange","NASD"), symbol, mode=mode) or {}
+                    try:
+                        _cancel_unfilled_for_symbol(exchange, symbol)
+                    except Exception:
+                        pass
+                    px = kis_quote.get_current_price(exchange, symbol, mode=mode) or {}
                     sell_price = float(px.get("last", 0) or 0)
                     if sell_price <= 0:
                         log.warning(f"[Engine] {symbol} 매도가 산출 실패(현재가 0)로 손절 매도 스킵")
+                        history["skips"].append({"side": "sell", "symbol": symbol, "reason": "stop_loss_price_unavailable"})
                     else:
                         sell_price = sell_price * (1.0 - (slippage_pct / 100.0))
-                        kis_order.order(symbol, qty, sell_price, 'sell', exchange=info.get("exchange","NASD"), order_type='00', mode=mode)
+                        out = kis_order.order(symbol, qty, sell_price, 'sell', exchange=exchange, order_type='00', mode=mode)
+                        history["sell_attempts"].append({
+                            "symbol": symbol,
+                            "exchange": exchange,
+                            "qty": qty,
+                            "price": sell_price,
+                            "reason": "stop_loss",
+                            "order_no": (out or {}).get("ODNO") or (out or {}).get("odno"),
+                            "ok": bool(out),
+                        })
                         sell_orders_sent += 1
+                        try:
+                            if out:
+                                sold_symbols.add((symbol or "").strip().upper())
+                                self._stop_loss_cooldown[(symbol or "").strip().upper()] = datetime.now()
+                        except Exception:
+                            pass
                     continue
 
                 # 보유기간 초과 강제매도 (로컬 추적 기반)
@@ -675,39 +1040,38 @@ class TradingEngine:
                             days_held = (datetime.now().date() - od).days
                             if days_held >= max_hold_days:
                                 log.info(f"[Engine] 보유기간 초과 매도: {symbol} ({days_held}d >= {max_hold_days}d)")
-                                px = kis_quote.get_current_price(info.get("exchange","NASD"), symbol, mode=mode) or {}
+                                try:
+                                    _cancel_unfilled_for_symbol(exchange, symbol)
+                                except Exception:
+                                    pass
+                                px = kis_quote.get_current_price(exchange, symbol, mode=mode) or {}
                                 sell_price = float(px.get("last", 0) or 0)
                                 if sell_price <= 0:
                                     log.warning(f"[Engine] {symbol} 매도가 산출 실패(현재가 0)로 보유기간 매도 스킵")
+                                    history["skips"].append({"side": "sell", "symbol": symbol, "reason": "max_hold_price_unavailable"})
                                 else:
                                     sell_price = sell_price * (1.0 - (slippage_pct / 100.0))
-                                    kis_order.order(symbol, qty, sell_price, 'sell', exchange=info.get("exchange","NASD"), order_type='00', mode=mode)
+                                    out = kis_order.order(symbol, qty, sell_price, 'sell', exchange=exchange, order_type='00', mode=mode)
+                                    history["sell_attempts"].append({
+                                        "symbol": symbol,
+                                        "exchange": exchange,
+                                        "qty": qty,
+                                        "price": sell_price,
+                                        "reason": "max_hold_days",
+                                        "order_no": (out or {}).get("ODNO") or (out or {}).get("odno"),
+                                        "ok": bool(out),
+                                    })
                                     sell_orders_sent += 1
+                                    try:
+                                        if out:
+                                            sold_symbols.add((symbol or "").strip().upper())
+                                            self._stop_loss_cooldown[(symbol or "").strip().upper()] = datetime.now()
+                                    except Exception:
+                                        pass
                         except Exception:
                             pass
 
-            # 4-2. 분석 리스트 매도 (여기서는 exchange 정보가 없어도 보유종목 매도라 상관없음)
-            for item in sell_list:
-                # item: "TSLA" 또는 {"code":"TSLA","exchange":"NAS"}
-                if isinstance(item, dict):
-                    symbol = (item.get('code') or '').strip().upper()
-                    exchange = (item.get('exchange') or 'NASD').strip().upper()
-                else:
-                    symbol = (str(item) or '').strip().upper()
-                    exchange = 'NASD'
-
-                if symbol in my_stocks:
-                    qty = my_stocks[symbol]['qty']
-                    exchange = my_stocks[symbol].get("exchange") or exchange
-                    log.info(f"[Engine] 분석 리스트 매도: {symbol} {qty}주 ({exchange})")
-                    px = kis_quote.get_current_price(exchange, symbol, mode=mode) or {}
-                    sell_price = float(px.get("last", 0) or 0)
-                    if sell_price <= 0:
-                        log.warning(f"[Engine] {symbol} 매도가 산출 실패(현재가 0)로 분석 매도 스킵")
-                    else:
-                        sell_price = sell_price * (1.0 - (slippage_pct / 100.0))
-                        kis_order.order(symbol, qty, sell_price, 'sell', exchange=exchange, order_type='00', mode=mode)
-                        sell_orders_sent += 1
+            # (B안) 분석 리스트 기반 매도 기능 제거: sell_list는 무시한다.
 
             # 키움 패턴처럼: 매도가 있었다면 잠깐 대기 후(체결/예수금 반영) 매수 예산 산정 시 최신 잔고를 쓰도록 한다.
             present_after_sell = None
@@ -729,6 +1093,8 @@ class TradingEngine:
                     buy_list = []
                     # 매도는 이미 실행되었으므로 매수만 건너뛰고 종료
                     log.info("=== 자동매매 엔진 실행 완료 (sell-only: fx_rate_unavailable) ===")
+                    history["status"] = "partial" if history["sell_attempts"] else "no_trade"
+                    history["message"] = "buy_skipped_fx_rate_unavailable"
                     return
 
                 # 분석 서버 포맷 지원:
@@ -747,12 +1113,32 @@ class TradingEngine:
 
                 if not normalized_buy:
                     logger.info("[Engine] 매수 대상 종목이 없습니다.")
+                    history["status"] = "partial" if history["sell_attempts"] else "no_trade"
+                    history["message"] = "no_buy_candidates"
                     return
 
                 # 매수 대상 수를 top_n으로 제한
                 # 중요: 이미 보유중인 종목이 섞여 있으면, 먼저 제외한 뒤 top_n을 다시 뽑아야
                 # 실제 매수 종목 수가 top_n에 가깝게 나온다.
                 candidates = [x for x in normalized_buy if x.get("code") and x.get("code") not in my_stocks][:top_n]
+                # 제외 사유 기록(사용자 친화 UI용)
+                try:
+                    for x in normalized_buy:
+                        sym = x.get("code")
+                        if not sym:
+                            continue
+                        if sym in my_stocks:
+                            history["excluded"]["buy"].append({"symbol": sym, "reason": "already_held"})
+                    # top_n 밖으로 밀린 종목
+                    kept = set([x.get("code") for x in candidates if x.get("code")])
+                    for x in normalized_buy:
+                        sym = x.get("code")
+                        if not sym or sym in my_stocks:
+                            continue
+                        if sym not in kept:
+                            history["excluded"]["buy"].append({"symbol": sym, "reason": "beyond_top_n"})
+                except Exception:
+                    pass
 
                 # autokiwoomstock처럼 "1회 예산 입력"은 사용하지 않고
                 # 계좌의 '총 주문가능금액(USD)' - reserve_cash(USD 환산) 를 이번 실행 예산으로 사용
@@ -760,6 +1146,7 @@ class TradingEngine:
                 # - 실전: 해외주식-035(해외증거금 통화별조회) USD의 itgr_ord_psbl_amt(통합주문가능금액) 우선
                 # - 모의: 해외주식-035 미지원 -> v1_008 output3.frcr_use_psbl_amt(외화사용가능금액)로 대체
                 orderable_cash = 0.0
+                orderable_source = None
                 try:
                     if mode == "real":
                         fm = kis_order.get_foreign_margin(mode=mode) or {}
@@ -772,6 +1159,8 @@ class TradingEngine:
                                 break
                         if usd and usd.get("itgr_ord_psbl_amt") is not None:
                             orderable_cash = float(str(usd.get("itgr_ord_psbl_amt") or 0).replace(",", ""))
+                            if orderable_cash > 0:
+                                orderable_source = "035_itgr"
 
                     if orderable_cash <= 0:
                         ps = (present_after_sell or kis_order.get_present_balance(
@@ -787,30 +1176,62 @@ class TradingEngine:
                         if usd_row:
                             v = usd_row.get("frcr_drwg_psbl_amt_1") or usd_row.get("frcr_dncl_amt_2") or 0
                             orderable_cash = float(str(v or 0).replace(",", ""))
+                            if orderable_cash > 0:
+                                orderable_source = "008_out2_usd"
                         if orderable_cash <= 0:
                             out3 = ps.get("output3") or {}
                             orderable_cash = float(str(out3.get("frcr_use_psbl_amt") or 0).replace(",", ""))
+                            if orderable_cash > 0:
+                                orderable_source = "008_frcr_use"
                         # mock 마지막 fallback: 총자산(원화)/환율로 "통합증거금 느낌"의 총가용 USD 추정
                         if mode == "mock" and orderable_cash <= 0:
                             try:
                                 # 이미 산출한 자동 환율(없으면 설정값 fallback)을 사용
                                 usd_krw_rate = float(str(usd_krw_rate or 1350.0).replace(",", ""))
-                                tot_asst_krw = float(str((ps.get("output3") or {}).get("tot_asst_amt") or 0).replace(",", ""))
-                                if usd_krw_rate > 0 and tot_asst_krw > 0:
+                                out3 = (ps.get("output3") or {}) if isinstance(ps, dict) else {}
+                                tot_asst_krw = float(str(out3.get("tot_asst_amt") or 0).replace(",", ""))
+                                evlu_krw = float(str(out3.get("evlu_amt_smtl") or out3.get("evlu_amt_smtl_amt") or 0).replace(",", ""))
+                                cash_krw = max(0.0, tot_asst_krw - evlu_krw)
+                                if usd_krw_rate > 0 and cash_krw > 0:
+                                    orderable_cash = cash_krw / usd_krw_rate
+                                    if orderable_cash > 0:
+                                        orderable_source = "mock_est_cash_krw"
+                                elif usd_krw_rate > 0 and tot_asst_krw > 0:
+                                    # 최후 폴백(기존 동작): 현금성 추정이 0일 때만 총자산 기반
                                     orderable_cash = tot_asst_krw / usd_krw_rate
+                                    if orderable_cash > 0:
+                                        orderable_source = "mock_est_tot_asset"
                             except Exception:
                                 pass
                 except Exception:
                     orderable_cash = 0.0
+                    orderable_source = None
 
                 total_budget = max(0.0, orderable_cash - reserve_cash)
                 per_stock_budget = total_budget / len(candidates) if candidates else 0.0
+                try:
+                    history["snapshot"].setdefault("budget", {})
+                    history["snapshot"]["budget"] = {
+                        "orderable_usd": float(orderable_cash),
+                        "orderable_source": orderable_source,
+                        "reserve_cash_usd": float(reserve_cash),
+                        "total_budget_usd": float(total_budget),
+                        "per_stock_budget_usd": float(per_stock_budget),
+                        "candidate_count": int(len(candidates) if candidates else 0),
+                    }
+                except Exception:
+                    pass
+                _trace("budget.ready", orderable_usd=orderable_cash, source=orderable_source, reserve_cash_usd=reserve_cash, total_budget_usd=total_budget, per_stock_budget_usd=per_stock_budget)
                 if not candidates:
                     logger.info("[Engine] 매수 대상 종목이 없습니다. (보유종목 제외 후)")
+                    history["status"] = "partial" if history["sell_attempts"] else "no_trade"
+                    history["message"] = "no_buy_candidates_after_filter"
                     return
 
                 if per_stock_budget <= 0:
                     log.warning(f"[Engine] 매수 예산 부족: orderable_cash={orderable_cash}, reserve_cash_usd≈{reserve_cash:.2f}")
+                    history["status"] = "partial" if history["sell_attempts"] else "no_trade"
+                    history["message"] = "buy_budget_insufficient"
                     return
 
                 for item in candidates:
@@ -829,41 +1250,15 @@ class TradingEngine:
                     price_info = kis_quote.get_current_price(exchange, symbol, mode=mode)
                     if not price_info:
                         log.warning(f"[Engine] {symbol} 시세 조회 실패")
+                        history["skips"].append({"side": "buy", "symbol": symbol, "reason": "quote_failed", "detail": {"exchange": exchange}})
                         continue
                         
                     current_price = float(price_info['last'])
                     if current_price <= 0:
                         log.warning(f"[Engine] {symbol} 현재가 0원")
+                        history["skips"].append({"side": "buy", "symbol": symbol, "reason": "price_zero", "detail": {"exchange": exchange}})
                         continue
 
-                    # 연속 API 호출 간 간격 확보(EGW00201 완화)
-                    time_module.sleep(0.25)
-                        
-                    # 1) 종목당 예산 기준 수량
-                    qty_by_budget = int(per_stock_budget // current_price)
-                    if qty_by_budget <= 0:
-                        log.info(f"[Engine] 예산 부족으로 매수 불가: {symbol} (필요: {current_price}, 예산: {per_stock_budget})")
-                        continue
-
-                    # 2) KIS 매수가능금액조회 기준 최대수량
-                    ps = kis_order.get_buyable_amount(exchange=exchange, symbol=symbol, price=current_price, mode=mode)
-                    if ps is None:
-                        # 정책: v1_014가 최종 실패하면 해당 종목 매수는 스킵 (부분체결/로그-잔고 불일치 방지)
-                        log.warning(f"[Engine] 매수가능금액조회(v1_014) 최종 실패(EGW00201 등). {symbol} 매수 스킵")
-                        continue
-                    max_ps_qty = None
-                    try:
-                        if ps and ps.get("max_ord_psbl_qty"):
-                            max_ps_qty = int(float(ps["max_ord_psbl_qty"]))
-                        elif ps and ps.get("ord_psbl_qty"):
-                            max_ps_qty = int(float(ps["ord_psbl_qty"]))
-                    except Exception:
-                        max_ps_qty = None
-
-                    qty = qty_by_budget
-                    if max_ps_qty is not None:
-                        qty = min(qty, max_ps_qty)
-                    
                     # 매수 방식(키움 참고):
                     # - mock: 호가 API 미지원이므로 기존처럼 (현재가 + 슬리피지) 지정가
                     # - real: 매도 1호가부터 단계적으로 지정가 매수(미체결이면 다음 호가), 가드(최대 허용 프리미엄%) 적용
@@ -871,6 +1266,50 @@ class TradingEngine:
                     limit_buy_max_premium_pct = float(strategy.get("limit_buy_max_premium_pct", 1.0) or 1.0)
                     limit_buy_max_levels = int(strategy.get("limit_buy_max_levels", 5) or 5)
                     limit_buy_step_wait_sec = float(strategy.get("limit_buy_step_wait_sec", 1.0) or 1.0)
+
+                    # 슬리피지 주문은 실제 주문 단가가 current_price보다 높아질 수 있어,
+                    # v1_014(매수가능수량) 조회 및 예산 수량 산정도 "실제 주문가" 기준으로 보수화한다.
+                    planned_buy_price = current_price
+                    if not (mode == "real" and buy_order_method == "limit_ask_ladder"):
+                        planned_buy_price = current_price * (1.0 + (slippage_pct / 100.0))
+
+                    # 연속 API 호출 간 간격 확보(EGW00201 완화)
+                    time_module.sleep(0.25)
+                        
+                    # 1) 종목당 예산 기준 수량
+                    qty_by_budget = int(per_stock_budget // planned_buy_price) if planned_buy_price > 0 else 0
+                    if qty_by_budget <= 0:
+                        log.info(f"[Engine] 예산 부족으로 매수 불가: {symbol} (필요: {current_price}, 예산: {per_stock_budget})")
+                        history["skips"].append({"side": "buy", "symbol": symbol, "reason": "budget_insufficient", "detail": {"exchange": exchange, "current_price": current_price, "per_stock_budget": per_stock_budget}})
+                        continue
+
+                    # 2) KIS 매수가능금액조회 기준 최대수량
+                    max_ps_qty = None
+                    if mode == "mock":
+                        _trace("buy.buyable.skip_mock", symbol=symbol, exchange=exchange, price=float(planned_buy_price))
+                    else:
+                        ps = kis_order.get_buyable_amount(exchange=exchange, symbol=symbol, price=planned_buy_price, mode=mode)
+                        if ps is None:
+                            # 정책: v1_014가 최종 실패하면 해당 종목 매수는 스킵 (부분체결/로그-잔고 불일치 방지)
+                            log.warning(f"[Engine] 매수가능금액조회(v1_014) 최종 실패(EGW00201 등). {symbol} 매수 스킵")
+                            history["skips"].append({"side": "buy", "symbol": symbol, "reason": "buyable_query_failed", "detail": {"exchange": exchange, "price": planned_buy_price}})
+                            continue
+                        try:
+                            if ps and ps.get("max_ord_psbl_qty"):
+                                max_ps_qty = int(float(ps["max_ord_psbl_qty"]))
+                            elif ps and ps.get("ord_psbl_qty"):
+                                max_ps_qty = int(float(ps["ord_psbl_qty"]))
+                        except Exception:
+                            max_ps_qty = None
+
+                    qty = qty_by_budget
+                    if max_ps_qty is not None:
+                        qty = min(qty, max_ps_qty)
+
+                    if qty <= 0:
+                        log.info(f"[Engine] 매수가능수량 부족으로 매수 불가: {symbol} (예산수량={qty_by_budget}, 매수가능={max_ps_qty})")
+                        history["skips"].append({"side": "buy", "symbol": symbol, "reason": "qty_insufficient", "detail": {"exchange": exchange, "qty_by_budget": qty_by_budget, "max_ps_qty": max_ps_qty}})
+                        continue
 
                     def _find_unfilled_qty_by_odno(odno: str) -> int:
                         try:
@@ -917,22 +1356,52 @@ class TradingEngine:
                         ob = kis_quote.get_asking_price(exchange, symbol, mode=mode)
                         if not ob:
                             log.warning(f"[Engine] {symbol} 호가 조회 실패 → 슬리피지 지정가로 폴백")
+                            _trace("buy.ladder.hoga_failed", symbol=symbol, exchange=exchange)
                             return False, "ask_api_failed"
                         asks = _extract_asks(ob)
                         if not asks:
                             log.warning(f"[Engine] {symbol} 호가 데이터 없음 → 슬리피지 지정가로 폴백")
+                            _trace("buy.ladder.hoga_empty", symbol=symbol, exchange=exchange)
                             return False, "asks_empty"
 
                         max_price = current_price * (1.0 + (limit_buy_max_premium_pct / 100.0)) if current_price > 0 else 0.0
                         remaining = int(qty)
                         used_levels = max(1, min(int(limit_buy_max_levels), len(asks)))
+                        _trace(
+                            "buy.ladder.start",
+                            symbol=symbol,
+                            exchange=exchange,
+                            qty=int(qty),
+                            current_price=float(current_price),
+                            max_price=float(max_price),
+                            max_premium_pct=float(limit_buy_max_premium_pct),
+                            levels=int(used_levels),
+                            step_wait_sec=float(limit_buy_step_wait_sec),
+                        )
 
                         for level_idx in range(used_levels):
                             ask_price = asks[level_idx]
+                            _trace(
+                                "buy.ladder.level.begin",
+                                symbol=symbol,
+                                exchange=exchange,
+                                level=int(level_idx + 1),
+                                ask_price=float(ask_price),
+                                remaining=int(remaining),
+                                max_price=float(max_price),
+                            )
                             if max_price > 0 and ask_price > max_price:
                                 log.warning(
                                     f"[Engine] 매수 가드 발동: {symbol} 매도{level_idx+1}호가 {ask_price:.4f} > max {max_price:.4f} "
                                     f"(허용 +{limit_buy_max_premium_pct:.2f}%) → 매수 스킵"
+                                )
+                                _trace(
+                                    "buy.ladder.guard_triggered",
+                                    symbol=symbol,
+                                    exchange=exchange,
+                                    level=int(level_idx + 1),
+                                    ask_price=float(ask_price),
+                                    max_price=float(max_price),
                                 )
                                 return False, "guard_triggered"
 
@@ -951,14 +1420,50 @@ class TradingEngine:
 
                             if remaining <= 0:
                                 log.info(f"[Engine] 매수가능수량 부족으로 매수 불가: {symbol} (매수가능={max_ps_qty2})")
-                                return False
+                                _trace(
+                                    "buy.ladder.qty_insufficient",
+                                    symbol=symbol,
+                                    exchange=exchange,
+                                    level=int(level_idx + 1),
+                                    ask_price=float(ask_price),
+                                    max_ps_qty=int(max_ps_qty2) if max_ps_qty2 is not None else None,
+                                )
+                                return False, "qty_insufficient"
 
                             log.info(f"[Engine] 지정가 매수 시도: {symbol}({exchange}) {remaining}주 @매도{level_idx+1}호가({ask_price})")
+                            _trace(
+                                "buy.ladder.order.submit",
+                                symbol=symbol,
+                                exchange=exchange,
+                                level=int(level_idx + 1),
+                                qty=int(remaining),
+                                price=float(ask_price),
+                            )
                             out = kis_order.order(symbol, remaining, ask_price, 'buy', exchange=exchange, order_type='00', mode=mode)
                             odno = (out or {}).get("ODNO") or (out or {}).get("odno")
+                            # ladder 주문 시도도 이력에 기록(상세 UI용)
+                            try:
+                                history["buy_attempts"].append({
+                                    "symbol": symbol,
+                                    "exchange": exchange,
+                                    "qty": int(remaining),
+                                    "price": float(ask_price),
+                                    "method": "ask_ladder",
+                                    "level": int(level_idx + 1),
+                                    "ok": bool(out),
+                                    "order_no": odno,
+                                })
+                            except Exception:
+                                pass
                             if not odno:
                                 log.warning(f"[Engine] {symbol} 매수 주문 실패(주문번호 없음)")
                                 # 안전상 추가 주문을 진행하지 않는다(중복/과매수 방지).
+                                _trace(
+                                    "buy.ladder.order.no_order_no",
+                                    symbol=symbol,
+                                    exchange=exchange,
+                                    level=int(level_idx + 1),
+                                )
                                 return False, "order_no_missing"
 
                             # 짧게 대기 후 미체결 잔량 확인
@@ -966,10 +1471,25 @@ class TradingEngine:
                             unfilled_qty = _find_unfilled_qty_by_odno(odno)
                             if unfilled_qty <= 0:
                                 log.info(f"[Engine] {symbol} 매수 체결(또는 미체결 목록에서 제거됨): odno={odno}")
+                                _trace(
+                                    "buy.ladder.filled_or_removed",
+                                    symbol=symbol,
+                                    exchange=exchange,
+                                    level=int(level_idx + 1),
+                                    order_no=str(odno),
+                                )
                                 return True, "filled_or_removed"
 
                             # 잔량 취소 후 다음 호가로 재시도(중복 미체결 방지)
                             log.info(f"[Engine] {symbol} 미체결 잔량 {unfilled_qty}주 → 취소 후 다음 호가로 재시도 (odno={odno})")
+                            _trace(
+                                "buy.ladder.unfilled",
+                                symbol=symbol,
+                                exchange=exchange,
+                                level=int(level_idx + 1),
+                                order_no=str(odno),
+                                unfilled_qty=int(unfilled_qty),
+                            )
                             cncl = kis_order.revise_cancel_order(
                                 exchange=exchange,
                                 symbol=symbol,
@@ -979,40 +1499,101 @@ class TradingEngine:
                                 action="cancel",
                                 mode=mode,
                             )
+                            _trace("buy.ladder.cancel", symbol=symbol, exchange=exchange, order_no=str(odno), unfilled_qty=int(unfilled_qty), ok=bool(cncl))
                             if not cncl:
                                 log.warning(f"[Engine] {symbol} 잔량 취소 실패 → 중복 주문 방지 위해 재시도 중단 (odno={odno})")
                                 # 취소 실패 시 중복 주문 위험이 크므로 폴백 포함 추가 주문 금지
+                                _trace(
+                                    "buy.ladder.cancel_failed",
+                                    symbol=symbol,
+                                    exchange=exchange,
+                                    level=int(level_idx + 1),
+                                    order_no=str(odno),
+                                    unfilled_qty=int(unfilled_qty),
+                                )
                                 return False, "cancel_failed"
 
                             remaining = int(unfilled_qty)
+                            _trace(
+                                "buy.ladder.level.next",
+                                symbol=symbol,
+                                exchange=exchange,
+                                next_level=int(level_idx + 2),
+                                remaining=int(remaining),
+                            )
                             # 다음 단계로 넘어가기 전 과도한 호출 방지
                             time_module.sleep(0.4)
 
                         # 여기까지 왔으면 최대 레벨까지 시도했으나 잔량이 남은 케이스
                         log.warning(f"[Engine] {symbol} 지정가 호가 상향 시도 후에도 미체결 잔량이 남아 매수 완료 실패(remaining={remaining})")
                         # 부분체결 가능성이 있으므로 폴백 포함 추가 주문 금지
+                        _trace(
+                            "buy.ladder.unfilled_remaining",
+                            symbol=symbol,
+                            exchange=exchange,
+                            remaining=int(remaining),
+                        )
                         return False, "unfilled_remaining"
 
                     if qty > 0:
                         if mode == "real" and buy_order_method == "limit_ask_ladder":
+                            # 매수 전 선취소: 동일 종목 미체결 주문이 있으면 취소하고 진행 (실전)
+                            try:
+                                _cancel_unfilled_for_symbol(exchange, symbol, side_filter="buy")
+                            except Exception:
+                                pass
                             ok, reason = _buy_with_ask_ladder()
                             if (not ok) and (reason in ("ask_api_failed", "asks_empty")):
                                 # 실전에서 "호가 조회 자체"가 불가한 환경이면 ladder를 시작할 수 없다.
                                 # 이 경우에만(=ladder 주문을 넣기 전) 기존 방식으로 1회 폴백한다.
                                 buy_price = current_price * (1.0 + (slippage_pct / 100.0))
                                 log.info(f"[Engine] ladder 불가({reason}) → 슬리피지 지정가 1회 폴백: {symbol} {qty}주 (@{buy_price})")
-                                kis_order.order(symbol, qty, buy_price, 'buy', exchange=exchange, order_type='00', mode=mode)
+                                out = kis_order.order(symbol, qty, buy_price, 'buy', exchange=exchange, order_type='00', mode=mode)
+                                history["buy_attempts"].append({
+                                    "symbol": symbol,
+                                    "exchange": exchange,
+                                    "qty": qty,
+                                    "price": buy_price,
+                                    "method": "slippage_fallback",
+                                    "ok": bool(out),
+                                    "order_no": (out or {}).get("ODNO") or (out or {}).get("odno"),
+                                    "note": f"ladder_unavailable:{reason}",
+                                })
                             elif not ok:
                                 # 가드 발동/부분체결/취소 실패 등 "중복/과매수 위험" 케이스에서는 추가 주문을 금지한다.
                                 log.warning(f"[Engine] ladder 실패({reason}) → 안전상 추가 폴백 주문을 생략합니다.")
+                                history["skips"].append({"side": "buy", "symbol": symbol, "reason": f"ladder_failed_no_fallback:{reason}"})
                         else:
-                            buy_price = current_price * (1.0 + (slippage_pct / 100.0))
+                            # 매수 전 선취소: 동일 종목 미체결 주문이 있으면 취소하고 진행 (실전)
+                            try:
+                                _cancel_unfilled_for_symbol(exchange, symbol, side_filter="buy")
+                            except Exception:
+                                pass
+                            buy_price = planned_buy_price
                             log.info(f"[Engine] 매수 주문 실행: {symbol}({exchange}) {qty}주 (@{buy_price})")
-                            kis_order.order(symbol, qty, buy_price, 'buy', exchange=exchange, order_type='00', mode=mode)
-                    else:
-                        log.info(f"[Engine] 매수가능수량 부족으로 매수 불가: {symbol} (예산수량={qty_by_budget}, 매수가능={max_ps_qty})")
+                            out = kis_order.order(symbol, qty, buy_price, 'buy', exchange=exchange, order_type='00', mode=mode)
+                            history["buy_attempts"].append({
+                                "symbol": symbol,
+                                "exchange": exchange,
+                                "qty": qty,
+                                "price": buy_price,
+                                "method": "slippage",
+                                "ok": bool(out),
+                                "order_no": (out or {}).get("ODNO") or (out or {}).get("odno"),
+                            })
+                    # qty<=0 케이스는 상단에서 스킵 처리(중복 기록 방지)
 
             log.info("=== 자동매매 엔진 실행 완료 ===")
+            # status 요약
+            buy_ok = any(bool(x.get("ok")) for x in (history.get("buy_attempts") or []))
+            sell_ok = any(bool(x.get("ok")) for x in (history.get("sell_attempts") or []))
+            if buy_ok or sell_ok:
+                history["status"] = "success"
+            elif (history.get("buy_attempts") or history.get("sell_attempts")) or (history.get("skips") or history.get("errors")):
+                history["status"] = "partial"
+            else:
+                history["status"] = "no_trade"
+            history["message"] = history.get("message") or "ok"
 
             # (스케줄 실행 기록은 위에서 선 마킹 처리)
 
@@ -1022,7 +1603,16 @@ class TradingEngine:
             self.last_error = str(e)
             import traceback
             log.error(traceback.format_exc())
+            history["status"] = "error"
+            history["errors"].append(str(e))
+            history["message"] = f"exception:{e}"
         finally:
+            try:
+                history["finished_at"] = datetime.now().isoformat(timespec="seconds")
+                ExecutionHistoryStore(mode=mode).append(history)
+            except Exception:
+                # 이력 저장 실패는 매매 실패로 간주하지 않는다.
+                pass
             self.is_running = False
 
     def run(self):
@@ -1134,7 +1724,7 @@ class TradingEngine:
                     continue
 
                 try:
-                    qty = int(float(stock.get('ovrs_cblc_qty') or 0))
+                    qty = int(float(stock.get('ord_psbl_qty') or 0))
                 except Exception:
                     qty = 0
                 if qty <= 0:
