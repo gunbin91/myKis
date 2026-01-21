@@ -28,16 +28,18 @@ class KisOrder:
             # 음수 가격은 비정상 -> 0으로 처리(방어)
             if d < 0:
                 d = Decimal("0")
-                    # 소수 8자리로 절사(ROUND_DOWN) 후 불필요한 0 제거
-                    q = Decimal("0.00000001")
-                    d = d.quantize(q, rounding=ROUND_DOWN)
-                    
-                    # (23.8) 포맷이지만, API에 따라 불필요한 0이 길어지면 OPSQ2002 오류가 발생함 (특히 v1_014)
-                    # 따라서 59.82000000 -> 59.82 형태로 변환한다.
-                    s = format(d, "f")
-                    if "." in s:
-                        s = s.rstrip("0").rstrip(".")
-                    return s if s else "0"        except (InvalidOperation, ValueError, TypeError):
+
+            # 소수 8자리로 절사(ROUND_DOWN) 후 불필요한 0 제거
+            q = Decimal("0.00000001")
+            d = d.quantize(q, rounding=ROUND_DOWN)
+            
+            # (23.8) 포맷이지만, API에 따라 불필요한 0이 길어지면 OPSQ2002 오류가 발생함 (특히 v1_014)
+            # 따라서 59.82000000 -> 59.82 형태로 변환한다.
+            s = format(d, "f")
+            if "." in s:
+                s = s.rstrip("0").rstrip(".")
+            return s if s else "0"
+        except (InvalidOperation, ValueError, TypeError):
             return "0.00000000"
 
     def _get_order_tr_id(self, exchange: str, side: str, mode: str) -> str:
