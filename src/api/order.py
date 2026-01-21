@@ -28,14 +28,16 @@ class KisOrder:
             # 음수 가격은 비정상 -> 0으로 처리(방어)
             if d < 0:
                 d = Decimal("0")
-            # 소수 8자리로 절사(ROUND_DOWN) 후 고정 소수점 문자열로 출력
-            q = Decimal("0.00000001")
-            d = d.quantize(q, rounding=ROUND_DOWN)
-            # 절대 지수표기 사용 안 함 + (중요) 8자리 고정 유지
-            # 일부 KIS 환경에서 (23.8) 포맷을 엄격하게 체크할 수 있어 trailing zero를 제거하지 않는다.
-            s = format(d, "f")
-            return s if s else "0.00000000"
-        except (InvalidOperation, ValueError, TypeError):
+                    # 소수 8자리로 절사(ROUND_DOWN) 후 불필요한 0 제거
+                    q = Decimal("0.00000001")
+                    d = d.quantize(q, rounding=ROUND_DOWN)
+                    
+                    # (23.8) 포맷이지만, API에 따라 불필요한 0이 길어지면 OPSQ2002 오류가 발생함 (특히 v1_014)
+                    # 따라서 59.82000000 -> 59.82 형태로 변환한다.
+                    s = format(d, "f")
+                    if "." in s:
+                        s = s.rstrip("0").rstrip(".")
+                    return s if s else "0"        except (InvalidOperation, ValueError, TypeError):
             return "0.00000000"
 
     def _get_order_tr_id(self, exchange: str, side: str, mode: str) -> str:
@@ -644,13 +646,12 @@ class KisOrder:
                 err["detail"] = detail
             return {"_error": err}
 
-        if mode == "real":
-            item_cd_source = "v1_034"
-            item_cd = kis_quote.get_std_pdno(exchange=exchange, symbol=symbol, mode=mode)
-        else:
-            # 모의는 ITEM_CD를 직접 받는 형태로 처리(엔진에서는 v1_014 스킵)
-            item_cd_source = "direct"
-            item_cd = str(symbol).strip().upper()
+        # v1_014(매수가능금액조회) ITEM_CD는 Ticker(Symbol)를 입력해야 함.
+        # 가이드상 Length 12로 되어있으나, 예제(00011) 등은 Ticker임.
+        # ISIN(US...)을 넣으면 OPSQ2002(Input Field Size) 오류가 발생할 수 있음.
+        item_cd_source = "direct"
+        item_cd = str(symbol).strip().upper()
+        
         if not item_cd:
             log.error(f"[Order] ITEM_CD 매핑 실패: symbol={symbol}, exchange={exchange}")
             return _debug_error(
