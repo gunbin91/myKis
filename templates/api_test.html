@@ -156,10 +156,11 @@
       desc: 'KIS v1_해외주식-006(inquire-balance) 원본 응답',
       params: [
         {name:'exchange', label:'거래소(Order)', type:'select', default:'NASD', options:[
-          {value:'NASD',label:'NASD'},{value:'NYSE',label:'NYSE'},{value:'AMEX',label:'AMEX'},
+          {value:'NASD',label:'NASD(미국전체/모의:나스닥)'},{value:'NAS',label:'NAS(나스닥, 실전)'},
+          {value:'NYSE',label:'NYSE'},{value:'AMEX',label:'AMEX'},
           {value:'SEHK',label:'SEHK'},{value:'TKSE',label:'TKSE'},{value:'SHAA',label:'SHAA'},{value:'SZAA',label:'SZAA'},{value:'HASE',label:'HASE'},{value:'VNSE',label:'VNSE'}
         ]},
-        {name:'currency', label:'통화', type:'select', default:'USD', options:[{value:'USD',label:'USD'}]},
+        {name:'currency', label:'통화', type:'select', default:'USD', options:[{value:'USD',label:'USD'},{value:'HKD',label:'HKD'},{value:'CNY',label:'CNY'},{value:'JPY',label:'JPY'},{value:'VND',label:'VND'}]},
       ]
     },
     present_008: {
@@ -218,7 +219,7 @@
       path: '/api/quote/product-info',
       safe: true,
       real_only: true,
-      desc: 'KIS v1_해외주식-034 상품기본정보(모의 미지원)',
+      desc: 'KIS v1_해외주식-034 상품기본정보(모의 미지원, PRDT_TYPE_CD 자동 매핑)',
       params: [
         {name:'exchange', label:'거래소(Order)', type:'select', default:'NASD', options:[{value:'NASD',label:'NASD'},{value:'NYSE',label:'NYSE'},{value:'AMEX',label:'AMEX'},{value:'SEHK',label:'SEHK'},{value:'TKSE',label:'TKSE'},{value:'SHAA',label:'SHAA'},{value:'SZAA',label:'SZAA'},{value:'HASE',label:'HASE'},{value:'VNSE',label:'VNSE'}]},
         {name:'symbol', label:'종목', type:'text', default:'AAPL'},
@@ -243,14 +244,14 @@
       method: 'GET',
       path: '/api/account/buyable',
       safe: true,
-      desc: 'KIS v1_해외주식-014 매수가능금액/수량 조회 (티커→ITEM_CD 자동변환)',
+      desc: 'KIS v1_해외주식-014 매수가능금액/수량 조회 (실전: v1_034 std_pdno 사용)',
       params: [
         {name:'exchange', label:'거래소(Order)', type:'select', default:'NASD', options:[
           {value:'NASD',label:'NASD'},{value:'NYSE',label:'NYSE'},{value:'AMEX',label:'AMEX'},
           {value:'SEHK',label:'SEHK'},{value:'TKSE',label:'TKSE'},{value:'SHAA',label:'SHAA'},{value:'SZAA',label:'SZAA'},{value:'HASE',label:'HASE'},{value:'VNSE',label:'VNSE'}
         ]},
         {name:'symbol', label:'종목(티커)', type:'text', default:'AAPL'},
-        {name:'price', label:'가격(USD)', type:'number', default:'200', step:'0.01'},
+        {name:'price', label:'가격', type:'number', default:'200', step:'0.01'},
         {name:'debug', label:'debug(에러 상세)', type:'select', default:'1', options:[{value:'1',label:'on(1)'},{value:'0',label:'off(0)'}]},
       ]
     },
@@ -311,13 +312,16 @@
     // ===== 주문(위험) - 테스트 전용 엔드포인트(안전장치 포함) =====
     order_place_mock: {
       group: '주문(위험)',
-      name: '주문(모의 전용)(/api/test/orders/place)',
+      name: '주문(/api/test/orders/place)',
       method: 'POST',
       path: '/api/test/orders/place',
       safe: false,
-      desc: 'v1_해외주식-001 주문 테스트(안전상 모의(mock)만 허용)',
+      desc: 'v1_해외주식-001 주문 테스트',
       params: [
-        {name:'exchange', label:'거래소(Order)', type:'select', default:'NASD', options:[{value:'NASD',label:'NASD'},{value:'NYSE',label:'NYSE'},{value:'AMEX',label:'AMEX'}]},
+        {name:'exchange', label:'거래소(Order)', type:'select', default:'NASD', options:[
+          {value:'NASD',label:'NASD'},{value:'NYSE',label:'NYSE'},{value:'AMEX',label:'AMEX'},
+          {value:'SEHK',label:'SEHK'},{value:'TKSE',label:'TKSE'},{value:'SHAA',label:'SHAA'},{value:'SZAA',label:'SZAA'},{value:'HASE',label:'HASE'},{value:'VNSE',label:'VNSE'}
+        ]},
         {name:'symbol', label:'종목', type:'text', default:'AAPL'},
         {name:'side', label:'매수/매도', type:'select', default:'buy', options:[{value:'buy',label:'buy(매수)'},{value:'sell',label:'sell(매도)'}]},
         {name:'order_type', label:'주문구분', type:'select', default:'00', options:[{value:'00',label:'00(지정가)'}]},
@@ -333,7 +337,10 @@
       safe: false,
       desc: 'v1_해외주식-003 정정/취소(취소)',
       params: [
-        {name:'exchange', label:'거래소(Order)', type:'select', default:'NASD', options:[{value:'NASD',label:'NASD'},{value:'NYSE',label:'NYSE'},{value:'AMEX',label:'AMEX'}]},
+        {name:'exchange', label:'거래소(Order)', type:'select', default:'NASD', options:[
+          {value:'NASD',label:'NASD'},{value:'NYSE',label:'NYSE'},{value:'AMEX',label:'AMEX'},
+          {value:'SEHK',label:'SEHK'},{value:'TKSE',label:'TKSE'},{value:'SHAA',label:'SHAA'},{value:'SZAA',label:'SZAA'},{value:'HASE',label:'HASE'},{value:'VNSE',label:'VNSE'}
+        ]},
         {name:'symbol', label:'종목', type:'text', default:''},
         {name:'origin_order_no', label:'원주문번호(ODNO)', type:'text', default:''},
         {name:'qty', label:'취소수량', type:'number', default:'1', step:'1'},
@@ -347,7 +354,10 @@
       safe: false,
       desc: 'v1_해외주식-003 정정/취소(정정)',
       params: [
-        {name:'exchange', label:'거래소(Order)', type:'select', default:'NASD', options:[{value:'NASD',label:'NASD'},{value:'NYSE',label:'NYSE'},{value:'AMEX',label:'AMEX'}]},
+        {name:'exchange', label:'거래소(Order)', type:'select', default:'NASD', options:[
+          {value:'NASD',label:'NASD'},{value:'NYSE',label:'NYSE'},{value:'AMEX',label:'AMEX'},
+          {value:'SEHK',label:'SEHK'},{value:'TKSE',label:'TKSE'},{value:'SHAA',label:'SHAA'},{value:'SZAA',label:'SZAA'},{value:'HASE',label:'HASE'},{value:'VNSE',label:'VNSE'}
+        ]},
         {name:'symbol', label:'종목', type:'text', default:''},
         {name:'origin_order_no', label:'원주문번호(ODNO)', type:'text', default:''},
         {name:'qty', label:'정정수량', type:'number', default:'1', step:'1'},

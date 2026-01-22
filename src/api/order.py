@@ -329,7 +329,7 @@ class KisOrder:
             "ACNT_PRDT_CD": acnt_prdt_cd,
         }
 
-        for attempt in range(3):
+        for attempt in range(5):
             try:
                 res = requests.get(url, headers=headers, params=params, timeout=20)
                 if res.status_code == 200:
@@ -337,7 +337,10 @@ class KisOrder:
                     if data.get("rt_cd") == "0":
                         return data
                     if data.get("msg_cd") == "EGW00201":
-                        time.sleep(0.3 * (attempt + 1))
+                        time.sleep(0.5 * (attempt + 1))
+                        continue
+                    if data.get("msg_cd") == "APBK1350":
+                        time.sleep(0.7 * (attempt + 1))
                         continue
                     log.error(f"[Order] 해외증거금 통화별조회 실패: {data.get('msg1')} ({data.get('msg_cd')})")
                     return None
@@ -346,7 +349,10 @@ class KisOrder:
                     try:
                         data = res.json() or {}
                         if data.get("msg_cd") == "EGW00201":
-                            time.sleep(0.3 * (attempt + 1))
+                            time.sleep(0.5 * (attempt + 1))
+                            continue
+                        if data.get("msg_cd") == "APBK1350":
+                            time.sleep(0.7 * (attempt + 1))
                             continue
                     except Exception:
                         pass

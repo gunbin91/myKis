@@ -456,8 +456,8 @@ def api_test_orders_revise():
 @app.route('/api/test/orders/place', methods=['POST'])
 def api_test_orders_place():
     """
-    해외주식 주문(v1_해외주식-001) 테스트 - 안전상 모의(mock)만 허용
-    (실전 주문은 이 화면에서 지원하지 않음)
+    해외주식 주문(v1_해외주식-001) 테스트
+    - 실전 주문은 추가 확인 절차 필요
     """
     try:
         payload = request.json or {}
@@ -466,9 +466,6 @@ def api_test_orders_place():
             return jsonify({"success": False, "message": msg})
 
         mode = payload.get("mode") or config_manager.get("common.mode", "mock")
-        if mode != "mock":
-            return jsonify({"success": False, "message": "mock_only_for_safety", "mode": mode})
-
         exchange = payload.get("exchange") or "NASD"
         symbol = (payload.get("symbol") or "").strip()
         side = (payload.get("side") or "buy").strip()

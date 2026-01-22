@@ -1308,7 +1308,9 @@ class TradingEngine:
                             history["skips"].append({"side": "buy", "symbol": symbol, "reason": "buyable_query_failed", "detail": {"exchange": exchange, "price": planned_buy_price}})
                             continue
                         try:
-                            if ps and ps.get("max_ord_psbl_qty"):
+                            if ps and ps.get("ovrs_max_ord_psbl_qty"):
+                                max_ps_qty = int(float(ps["ovrs_max_ord_psbl_qty"]))
+                            elif ps and ps.get("max_ord_psbl_qty"):
                                 max_ps_qty = int(float(ps["max_ord_psbl_qty"]))
                             elif ps and ps.get("ord_psbl_qty"):
                                 max_ps_qty = int(float(ps["ord_psbl_qty"]))
@@ -1422,7 +1424,9 @@ class TradingEngine:
                             ps2 = kis_order.get_buyable_amount(exchange=exchange, symbol=symbol, price=ask_price, mode=mode)
                             max_ps_qty2 = None
                             try:
-                                if ps2 and ps2.get("max_ord_psbl_qty"):
+                                if ps2 and ps2.get("ovrs_max_ord_psbl_qty"):
+                                    max_ps_qty2 = int(float(ps2["ovrs_max_ord_psbl_qty"]))
+                                elif ps2 and ps2.get("max_ord_psbl_qty"):
                                     max_ps_qty2 = int(float(ps2["max_ord_psbl_qty"]))
                                 elif ps2 and ps2.get("ord_psbl_qty"):
                                     max_ps_qty2 = int(float(ps2["ord_psbl_qty"]))
