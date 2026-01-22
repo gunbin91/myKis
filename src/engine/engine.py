@@ -49,7 +49,7 @@ class TradingEngine:
         - kis_auth.get_token()은 EGW00133 대응(프로세스 간 쿨다운/락) 때문에 None을 반환할 수 있어,
           엔진 실행은 여기서 기다린 후 진행한다.
         """
-        log = get_mode_logger(mode)
+        log = get_mode_logger(mode, "ENGINE")
         try:
             timeout_sec = int(timeout_sec or 0)
         except Exception:
@@ -86,7 +86,7 @@ class TradingEngine:
         - 자동매매 프로세스는 순간적인 토큰/네트워크 이슈로 v1_008이 실패할 수 있어, 여기서 기다린 후 진행한다.
         - 실패 시 FxRateResult(rate=None, ...) 형태를 반환할 수 있다.
         """
-        log = get_mode_logger(mode)
+        log = get_mode_logger(mode, "ENGINE")
         try:
             timeout_sec = int(timeout_sec or 0)
         except Exception:
@@ -110,6 +110,7 @@ class TradingEngine:
                     tr_mket_cd="00",
                     inqr_dvsn_cd="00",
                     wcrc_frcr_dvsn_cd="02",
+                    caller="ENGINE",
                     mode=mode,
                 )
                 fx = get_usd_krw_rate(mode=mode, kis_present=(present or {}))
@@ -176,6 +177,8 @@ class TradingEngine:
                     trace_cb(step=step, **(meta or {}))
             except Exception:
                 pass
+
+        log = get_mode_logger(config_manager.get("common.mode", "mock"), "ENGINE")
 
         host = config_manager.get("common.analysis_host", "localhost")
         port = config_manager.get("common.analysis_port", 5500)
@@ -375,15 +378,15 @@ class TradingEngine:
                             if ("이미" in msg) and ("실행" in msg):
                                 start_ok = True
                             else:
-                                logger.warning(f"[Engine] 분석 start 400: {su} -> {msg}")
+                                log.warning(f"[Engine] 분석 start 400: {su} -> {msg}")
                         except Exception:
-                            logger.warning(f"[Engine] 분석 start 400: {su}")
+                            log.warning(f"[Engine] 분석 start 400: {su}")
                     else:
                         if sr.status_code == 404:
                             start_not_found = True
-                        logger.warning(f"[Engine] 분석 start 응답 오류: {su} -> {sr.status_code}")
+                        log.warning(f"[Engine] 분석 start 응답 오류: {su} -> {sr.status_code}")
                 except Exception as e:
-                    logger.warning(f"[Engine] 분석 start 호출 실패(무시하고 폴링): {su} -> {e}")
+                    log.warning(f"[Engine] 분석 start 호출 실패(무시하고 폴링): {su} -> {e}")
 
             # /api/start_analysis 가 없다면(404) 동기 실행 엔드포인트로 폴백 시도
             if (not start_ok) and start_not_found and base_url:
@@ -514,17 +517,17 @@ class TradingEngine:
             _trace("analysis.poll.timeout")
             return {"buy": [], "sell": []}
         except Exception as e:
-            logger.warning(f"[Engine] 분석 서버 연결 실패: {e}")
+            log.warning(f"[Engine] 분석 서버 연결 실패: {e}")
             _trace("analysis.exception", error=str(e))
             return {"buy": [], "sell": []}
 
     def _run_core(self, mode: str, analysis_data: dict | None, ignore_auto_enabled: bool):
         """주기적으로 실행될 메인 로직"""
+        log = get_mode_logger(mode, "ENGINE")
         if self.is_running:
-            logger.warning("[Engine] 이전 작업이 아직 진행 중입니다.")
+            log.warning("[Engine] 이전 작업이 아직 진행 중입니다.")
             return
 
-        log = get_mode_logger(mode)
         # 실행 이력(상세) 수집: 실패/예외 포함해서 1회 실행 단위로 저장한다.
         run_id = str(uuid4())
         started_at = datetime.now().isoformat(timespec="seconds")
@@ -1079,14 +1082,19 @@ class TradingEngine:
                 time_module.sleep(2.0)
                 try:
                     present_after_sell = kis_order.get_present_balance(
-                        natn_cd="000", tr_mket_cd="00", inqr_dvsn_cd="00", wcrc_frcr_dvsn_cd="02", mode=mode
+                        natn_cd="000",
+                        tr_mket_cd="00",
+                        inqr_dvsn_cd="00",
+                        wcrc_frcr_dvsn_cd="02",
+                        caller="ENGINE",
+                        mode=mode
                     )
                 except Exception:
                     present_after_sell = None
 
             # 5. 매수 실행
             if not buy_list:
-                logger.info("[Engine] 매수 대상 종목이 없습니다.")
+                log.info("[Engine] 매수 대상 종목이 없습니다.")
             else:
                 if not allow_buy:
                     log.info("[Engine] 매수 스킵: 환율 자동조회 실패로 매수 로직을 실행하지 않습니다.")
@@ -1112,7 +1120,7 @@ class TradingEngine:
                         normalized_buy.append({"code": code, "exchange": exchange})
 
                 if not normalized_buy:
-                    logger.info("[Engine] 매수 대상 종목이 없습니다.")
+                    log.info("[Engine] 매수 대상 종목이 없습니다.")
                     history["status"] = "partial" if history["sell_attempts"] else "no_trade"
                     history["message"] = "no_buy_candidates"
                     return
@@ -1149,7 +1157,7 @@ class TradingEngine:
                 orderable_source = None
                 try:
                     if mode == "real":
-                        fm = kis_order.get_foreign_margin(mode=mode) or {}
+                        fm = kis_order.get_foreign_margin(mode=mode, caller="ENGINE") or {}
                         rows = fm.get("output") or []
                         rows = rows if isinstance(rows, list) else [rows]
                         usd = None
@@ -1164,7 +1172,12 @@ class TradingEngine:
 
                     if orderable_cash <= 0:
                         ps = (present_after_sell or kis_order.get_present_balance(
-                            natn_cd="000", tr_mket_cd="00", inqr_dvsn_cd="00", wcrc_frcr_dvsn_cd="02", mode=mode
+                            natn_cd="000",
+                            tr_mket_cd="00",
+                            inqr_dvsn_cd="00",
+                            wcrc_frcr_dvsn_cd="02",
+                            caller="ENGINE",
+                            mode=mode
                         ) or {})
                         out2 = ps.get("output2") or []
                         out2 = out2 if isinstance(out2, list) else [out2]
@@ -1223,7 +1236,7 @@ class TradingEngine:
                     pass
                 _trace("budget.ready", orderable_usd=orderable_cash, source=orderable_source, reserve_cash_usd=reserve_cash, total_budget_usd=total_budget, per_stock_budget_usd=per_stock_budget)
                 if not candidates:
-                    logger.info("[Engine] 매수 대상 종목이 없습니다. (보유종목 제외 후)")
+                    log.info("[Engine] 매수 대상 종목이 없습니다. (보유종목 제외 후)")
                     history["status"] = "partial" if history["sell_attempts"] else "no_trade"
                     history["message"] = "no_buy_candidates_after_filter"
                     return
@@ -1598,7 +1611,7 @@ class TradingEngine:
             # (스케줄 실행 기록은 위에서 선 마킹 처리)
 
         except Exception as e:
-            log = get_mode_logger(config_manager.get('common.mode', 'mock'))
+            log = get_mode_logger(config_manager.get('common.mode', 'mock'), "ENGINE")
             log.error(f"[Engine] 실행 중 오류 발생: {e}")
             self.last_error = str(e)
             import traceback
@@ -1678,7 +1691,7 @@ class TradingEngine:
         - 자동매매와 별개로 intraday_stop_loss.enabled가 ON일 때만 동작
         """
         mode = config_manager.get('common.mode', 'mock')
-        log = get_mode_logger(mode)
+        log = get_mode_logger(mode, "ENGINE")
         try:
             intraday_cfg = config_manager.get(f"{mode}.intraday_stop_loss", {}) or {}
             intraday_enabled = bool(intraday_cfg.get("enabled", False))

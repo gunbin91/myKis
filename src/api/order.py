@@ -210,6 +210,7 @@ class KisOrder:
         tr_mket_cd: str = "00",
         inqr_dvsn_cd: str = "00",
         wcrc_frcr_dvsn_cd: str = "02",
+        caller: str | None = None,
         mode=None,
     ):
         """
@@ -219,7 +220,7 @@ class KisOrder:
         """
         if mode is None:
             mode = config_manager.get('common.mode', 'mock')
-        log = get_mode_logger(mode)
+        log = get_mode_logger(mode, source=f"API:{caller}" if caller else "API")
 
         url_base = config_manager.get(f'{mode}.url_base')
         app_key = config_manager.get(f'{mode}.app_key')
@@ -283,7 +284,7 @@ class KisOrder:
                 log.error(f"[Order] 체결기준현재잔고 조회 중 예외 발생: {e}")
                 return None
 
-    def get_foreign_margin(self, mode=None):
+    def get_foreign_margin(self, mode=None, caller: str | None = None):
         """
         해외증거금 통화별조회 (해외주식-035) - 실전 전용
 
@@ -295,7 +296,7 @@ class KisOrder:
         """
         if mode is None:
             mode = config_manager.get('common.mode', 'mock')
-        log = get_mode_logger(mode)
+        log = get_mode_logger(mode, source=f"API:{caller}" if caller else "API")
 
         if mode == "mock":
             log.warning("[Order] 해외증거금 통화별조회(해외주식-035)는 모의투자를 지원하지 않습니다.")

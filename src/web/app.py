@@ -313,6 +313,7 @@ def api_test_present_balance():
             tr_mket_cd=tr_mket_cd,
             inqr_dvsn_cd=inqr_dvsn_cd,
             wcrc_frcr_dvsn_cd=wcrc_frcr_dvsn_cd,
+            caller="WEB",
             mode=mode,
         )
         return jsonify({"success": bool(data), "data": data, "mode": mode})
@@ -327,7 +328,7 @@ def api_test_foreign_margin():
         mode = _api_test_mode()
         if mode == "mock":
             return jsonify({"success": False, "message": "real_only", "mode": mode})
-        data = kis_order.get_foreign_margin(mode=mode)
+        data = kis_order.get_foreign_margin(mode=mode, caller="WEB")
         return jsonify({"success": bool(data), "data": data, "mode": mode})
     except Exception as e:
         return jsonify({"success": False, "message": str(e)})
@@ -600,7 +601,14 @@ def get_status():
     balance_info = kis_order.get_balance(mode=mode) or {}
     # NATN_CD=000(전체)로 조회해야 통화별/전체 잔고 요약(output3)이 안정적으로 내려오는 편이다.
     # (미국 840로 고정하면 계좌/상황에 따라 0으로 내려오는 케이스가 있었다)
-    present_info = kis_order.get_present_balance(natn_cd="000", tr_mket_cd="00", inqr_dvsn_cd="00", wcrc_frcr_dvsn_cd="02", mode=mode) or {}
+    present_info = kis_order.get_present_balance(
+        natn_cd="000",
+        tr_mket_cd="00",
+        inqr_dvsn_cd="00",
+        wcrc_frcr_dvsn_cd="02",
+        caller="WEB",
+        mode=mode
+    ) or {}
 
     out3 = present_info.get("output3") or {}
     out2_raw = present_info.get("output2")
@@ -798,7 +806,7 @@ def get_status():
     fx_orderable_source = None
     try:
         if mode == "real":
-            fm = kis_order.get_foreign_margin(mode=mode) or {}
+            fm = kis_order.get_foreign_margin(mode=mode, caller="WEB") or {}
             rows = fm.get("output") or []
             rows = rows if isinstance(rows, list) else [rows]
             usd = None
@@ -1488,6 +1496,7 @@ def _build_trade_preview_view(analysis: dict | None, mode: str) -> dict:
     # 주문가능(USD) 계산: 035(실전) -> 008(output2 USD) -> 008(output3 frcr_use) -> mock 추정(총자산/환율)
     present = kis_order.get_present_balance(
         natn_cd="000", tr_mket_cd="00", inqr_dvsn_cd="00", wcrc_frcr_dvsn_cd="02", mode=mode
+        , caller="WEB"
     ) or {}
     out3 = present.get("output3") or {}
     # 자동 환율(원/달러): v1_008 output3의 frst_bltn_exrt(최초고시환율)을 우선 사용하고 실패 시 설정값 fallback
@@ -1505,7 +1514,7 @@ def _build_trade_preview_view(analysis: dict | None, mode: str) -> dict:
     orderable_source = None
     if mode == "real":
         try:
-            fm = kis_order.get_foreign_margin(mode=mode) or {}
+            fm = kis_order.get_foreign_margin(mode=mode, caller="WEB") or {}
             rows = fm.get("output") or []
             rows = rows if isinstance(rows, list) else [rows]
             for r in rows:

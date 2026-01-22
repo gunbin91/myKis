@@ -54,7 +54,15 @@ def setup_logger(name=None, log_file: str | None = None):
     
     return logger
 
-def get_mode_logger(mode: str):
+class _PrefixAdapter(logging.LoggerAdapter):
+    def process(self, msg, kwargs):
+        prefix = self.extra.get("prefix")
+        if prefix:
+            msg = f"{prefix} {msg}"
+        return msg, kwargs
+
+
+def get_mode_logger(mode: str, source: str | None = None):
     """
     mock/real 로그를 파일로 분리하기 위한 로거
     - logs/mock/system_YYYYMMDD.log
@@ -63,7 +71,10 @@ def get_mode_logger(mode: str):
     mode = (mode or "unknown").strip().lower()
     cache_key = f"myKis.{mode}"
     if cache_key in _LOGGER_CACHE:
-        return _LOGGER_CACHE[cache_key]
+        base = _LOGGER_CACHE[cache_key]
+        if source:
+            return _PrefixAdapter(base, {"prefix": f"[{mode.upper()}][{source.upper()}]"})
+        return base
 
     PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     mode_dir = os.path.join(PROJECT_ROOT, "logs", mode)
@@ -73,6 +84,8 @@ def get_mode_logger(mode: str):
 
     lg = setup_logger(name=cache_key, log_file=log_file)
     _LOGGER_CACHE[cache_key] = lg
+    if source:
+        return _PrefixAdapter(lg, {"prefix": f"[{mode.upper()}][{source.upper()}]"})
     return lg
 
 # 기본 로거 인스턴스
