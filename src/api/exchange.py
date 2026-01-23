@@ -25,6 +25,22 @@ ORDER_TO_QUOTE = {
     "AMEX": "AMS",
 }
 
+ANALYSIS_TO_QUOTE = {
+    "NASDAQ": "NAS",
+    "NASD": "NAS",
+    "NAS": "NAS",
+    "NYSE": "NYS",
+    "NYS": "NYS",
+    "AMEX": "AMS",
+    "AMS": "AMS",
+    "BAQ": "NAS",
+    "BAY": "NYS",
+    "BAA": "AMS",
+    "나스닥": "NAS",
+    "뉴욕": "NYS",
+    "아멕스": "AMS",
+}
+
 
 def normalize_quote_exchange(excd: str | None) -> str:
     """Quote API용 EXCD로 정규화."""
@@ -44,5 +60,24 @@ def normalize_order_exchange(ovrs_excg_cd: str | None) -> str:
     if ovrs_excg_cd in QUOTE_TO_ORDER:
         return QUOTE_TO_ORDER[ovrs_excg_cd]
     return ovrs_excg_cd
+
+
+def normalize_analysis_exchange(value: str | None) -> str | None:
+    """
+    분석 결과의 시장구분을 Quote용 EXCD(NAS/NYS/AMS)로 정규화.
+    """
+    if not value:
+        return None
+    v = str(value).strip().upper()
+    if not v:
+        return None
+    if v in ANALYSIS_TO_QUOTE:
+        return ANALYSIS_TO_QUOTE[v]
+    if v in ORDER_TO_QUOTE:
+        return ORDER_TO_QUOTE[v]
+    if v in QUOTE_TO_ORDER:
+        ovrs = QUOTE_TO_ORDER[v]
+        return ORDER_TO_QUOTE.get(ovrs)
+    return None
 
 

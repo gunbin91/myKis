@@ -10,6 +10,7 @@ from uuid import uuid4
 from src.engine.engine import trading_engine
 from src.engine.multi_process_scheduler import multi_process_scheduler
 from src.engine.scheduler_state_store import SchedulerStateStore
+from src.engine.run_state_store import RunStateStore
 from src.engine.execution_history_store import ExecutionHistoryStore
 from src.config.config_manager import config_manager
 from src.api.order import kis_order
@@ -567,8 +568,16 @@ def get_status():
         except Exception:
             return None
 
+    def _run_state_day(m: str) -> str | None:
+        try:
+            return RunStateStore(mode=m).get_last_scheduled_run_day()
+        except Exception:
+            return None
+
     next_run_mock = _next_run_for("mock")
     next_run_real = _next_run_for("real")
+    run_day_mock = _run_state_day("mock")
+    run_day_real = _run_state_day("real")
 
     # 현재 모드의 엔진 상태는 '해당 모드 스케줄러 프로세스'가 기록한 값으로 제공
     mode = config_manager.get("common.mode", "mock")
@@ -579,6 +588,7 @@ def get_status():
         "is_running": bool(sch_cur.get("is_executing", False)),
         "mode": mode,
         "engine_last_run_at": _as_iso(sch_cur.get("engine_last_run_at")),
+        "engine_last_run_day": run_day_mock if mode == "mock" else run_day_real,
         "engine_last_error": sch_cur.get("engine_last_error"),
         "engine_next_run_at": next_run_mock if mode == "mock" else next_run_real,
         "stop_watch_last_run_at": _as_iso(sch_cur.get("stop_watch_last_run_at")),
@@ -586,8 +596,8 @@ def get_status():
         "stop_watch_next_run_at": None,
         # 확장: 모드별 스케줄러 상태(디버깅/운영 확인용)
         "schedulers": {
-            "mock": {**sch_mock, "engine_next_run_at": next_run_mock},
-            "real": {**sch_real, "engine_next_run_at": next_run_real},
+            "mock": {**sch_mock, "engine_next_run_at": next_run_mock, "engine_last_run_day": run_day_mock},
+            "real": {**sch_real, "engine_next_run_at": next_run_real, "engine_last_run_day": run_day_real},
         },
     }
     

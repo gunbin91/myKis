@@ -368,8 +368,11 @@
         document.getElementById('auto-enabled-badge').className = 'badge ' + (cfg.auto_trading_enabled ? 'bg-success' : 'bg-secondary');
         document.getElementById('status-box').innerText =
           'mode=' + mode + ', market_open=' + d.status.market_open + ', engine_running=' + d.status.is_running;
+        const lastDay = d.status.engine_last_run_day || '-';
+        const lastAt = d.status.engine_last_run_at || '-';
         document.getElementById('status-detail').innerText =
-          'last_run=' + (d.status.engine_last_run_at || '-') +
+          'last_run_day=' + lastDay +
+          '\nlast_run_at=' + lastAt +
           '\nnext_run=' + (d.status.engine_next_run_at || '-') +
           (d.status.engine_last_error ? ('\nlast_error=' + d.status.engine_last_error) : '');
       });

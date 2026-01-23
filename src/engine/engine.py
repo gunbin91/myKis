@@ -6,6 +6,7 @@ from src.config.config_manager import config_manager
 from src.api.order import kis_order
 from src.api.quote import kis_quote
 from src.api.auth import kis_auth
+from src.api.exchange import normalize_analysis_exchange
 from src.utils.logger import logger, get_mode_logger
 from src.utils.fx_rate import get_usd_krw_rate
 from src.engine.position_store import PositionStore
@@ -231,10 +232,19 @@ class TradingEngine:
                     code = str(code).strip().upper()
                     if not code:
                         continue
-                    # 해외주식 자동매매(myKis) 기준 exchange는 NAS로 고정
+                    exchange_raw = (
+                        r.get("exchange")
+                        or r.get("시장구분")
+                        or r.get("market")
+                        or r.get("excd")
+                    )
+                    exchange = normalize_analysis_exchange(exchange_raw)
+                    if not exchange:
+                        log.warning(f"[Engine] 분석 exchange 파싱 실패 → 기본 NAS 사용: raw={exchange_raw}")
+                        exchange = "NAS"
                     buy.append({
                         "code": code,
-                        "exchange": "NAS",
+                        "exchange": exchange,
                         # UI/미리보기용 메타 (엔진 로직은 code/exchange만 사용)
                         "name": r.get("종목명") or r.get("name") or r.get("stock_name"),
                         "price": r.get("현재가") or r.get("price") or r.get("current_price"),
@@ -562,6 +572,27 @@ class TradingEngine:
             except Exception:
                 pass
         strategy = config_manager.get(f'{mode}.strategy', {})
+        last_step = "init"
+        last_context: dict = {}
+
+        def _set_step(step: str, **ctx):
+            nonlocal last_step, last_context
+            last_step = step
+            last_context = ctx or {}
+
+        def _log_issue(kind: str, message: str, **meta):
+            payload = {
+                "run_id": run_id,
+                "mode": mode,
+                "step": last_step,
+                **(last_context or {}),
+                **(meta or {}),
+            }
+            log.error(f"[Engine] {message} | {payload}")
+            try:
+                history["errors"].append({"kind": kind, **payload})
+            except Exception:
+                pass
         auto_enabled = config_manager.get(f'{mode}.auto_trading_enabled', False)
         schedule_time = config_manager.get(f"{mode}.schedule_time", "00:00") or "00:00"
 
@@ -1112,7 +1143,17 @@ class TradingEngine:
                 for item in buy_list:
                     if isinstance(item, dict):
                         code = (item.get('code') or '').strip().upper()
-                        exchange = (item.get('exchange') or 'NAS').strip().upper()
+                        exchange_raw = (
+                            item.get("exchange")
+                            or item.get("시장구분")
+                            or item.get("market")
+                            or item.get("excd")
+                        )
+                        exchange = normalize_analysis_exchange(exchange_raw)
+                        if not exchange:
+                            log.warning(f"[Engine] 매수 exchange 파싱 실패 → 기본 NAS 사용: raw={exchange_raw} ({code})")
+                            _trace("analysis.exchange.defaulted", symbol=code, raw=exchange_raw)
+                            exchange = "NAS"
                     else:
                         code = (str(item) or '').strip().upper()
                         exchange = 'NAS'
@@ -1260,13 +1301,28 @@ class TradingEngine:
                     time_module.sleep(0.25)
                         
                     # 현재가 조회 (거래소 정보 포함)
+                    _set_step("buy.quote.current", symbol=symbol, exchange=exchange)
                     price_info = kis_quote.get_current_price(exchange, symbol, mode=mode)
                     if not price_info:
                         log.warning(f"[Engine] {symbol} 시세 조회 실패")
                         history["skips"].append({"side": "buy", "symbol": symbol, "reason": "quote_failed", "detail": {"exchange": exchange}})
                         continue
-                        
-                    current_price = float(price_info['last'])
+
+                    last_raw = None
+                    if isinstance(price_info, dict):
+                        last_raw = price_info.get("last")
+                    try:
+                        current_price = float(str(last_raw).replace(",", "").strip())
+                    except Exception:
+                        _log_issue(
+                            "quote_invalid_last",
+                            f"[Engine] {symbol} 시세 last 파싱 실패",
+                            response=price_info,
+                            last_raw=last_raw,
+                            exchange=exchange,
+                        )
+                        history["skips"].append({"side": "buy", "symbol": symbol, "reason": "quote_invalid_last", "detail": {"exchange": exchange}})
+                        continue
                     if current_price <= 0:
                         log.warning(f"[Engine] {symbol} 현재가 0원")
                         history["skips"].append({"side": "buy", "symbol": symbol, "reason": "price_zero", "detail": {"exchange": exchange}})
@@ -1301,6 +1357,7 @@ class TradingEngine:
                     if mode == "mock":
                         _trace("buy.buyable.skip_mock", symbol=symbol, exchange=exchange, price=float(planned_buy_price))
                     else:
+                        _set_step("buy.buyable", symbol=symbol, exchange=exchange, price=float(planned_buy_price))
                         ps = kis_order.get_buyable_amount(exchange=exchange, symbol=symbol, price=planned_buy_price, mode=mode)
                         if ps is None:
                             # 정책: v1_014가 최종 실패하면 해당 종목 매수는 스킵 (부분체결/로그-잔고 불일치 방지)
@@ -1421,6 +1478,7 @@ class TradingEngine:
                                 return False, "guard_triggered"
 
                             # 가격이 바뀌면 매수가능수량도 바뀔 수 있어 재조회
+                            _set_step("buy.buyable_ladder", symbol=symbol, exchange=exchange, price=float(ask_price))
                             ps2 = kis_order.get_buyable_amount(exchange=exchange, symbol=symbol, price=ask_price, mode=mode)
                             max_ps_qty2 = None
                             try:
@@ -1616,12 +1674,18 @@ class TradingEngine:
 
         except Exception as e:
             log = get_mode_logger(config_manager.get('common.mode', 'mock'), "ENGINE")
-            log.error(f"[Engine] 실행 중 오류 발생: {e}")
+            try:
+                log.error(f"[Engine] 실행 중 오류 발생: {e} | step={last_step} | ctx={last_context}")
+            except Exception:
+                log.error(f"[Engine] 실행 중 오류 발생: {e}")
             self.last_error = str(e)
             import traceback
             log.error(traceback.format_exc())
             history["status"] = "error"
-            history["errors"].append(str(e))
+            try:
+                history["errors"].append({"kind": "exception", "error": str(e), "step": last_step, "context": last_context})
+            except Exception:
+                history["errors"].append(str(e))
             history["message"] = f"exception:{e}"
         finally:
             try:
