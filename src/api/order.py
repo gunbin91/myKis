@@ -42,6 +42,29 @@ class KisOrder:
         except (InvalidOperation, ValueError, TypeError):
             return "0.00000000"
 
+    def _format_order_price(self, price) -> str:
+        """
+        실전 주문 가격 포맷:
+        - $1 이상: 소수점 2자리
+        - $1 미만: 소수점 4자리
+        """
+        try:
+            if price is None:
+                return "0"
+            d = Decimal(str(price))
+            if d < 0:
+                d = Decimal("0")
+            if d == 0:
+                return "0"
+            if d >= Decimal("1"):
+                q = Decimal("0.01")
+            else:
+                q = Decimal("0.0001")
+            d = d.quantize(q, rounding=ROUND_DOWN)
+            return format(d, "f")
+        except (InvalidOperation, ValueError, TypeError):
+            return "0"
+
     def _get_order_tr_id(self, exchange: str, side: str, mode: str) -> str:
         """
         해외주식 주문 TR_ID 결정 (v1_해외주식-001)
@@ -470,7 +493,7 @@ class KisOrder:
             "OVRS_EXCG_CD": normalize_order_exchange(exchange),
             "PDNO": symbol,
             "ORD_QTY": str(quantity),
-            "OVRS_ORD_UNPR": self._format_ovrs_ord_unpr(price),
+            "OVRS_ORD_UNPR": self._format_order_price(price),
             "ORD_SVR_DVSN_CD": "0",
             "ORD_DVSN": order_type
         }
@@ -562,7 +585,7 @@ class KisOrder:
             "ORGN_ODNO": str(origin_order_no),
             "RVSE_CNCL_DVSN_CD": rvse_cncl,
             "ORD_QTY": str(int(qty)),
-            "OVRS_ORD_UNPR": self._format_ovrs_ord_unpr(price),
+            "OVRS_ORD_UNPR": self._format_order_price(price),
             "ORD_SVR_DVSN_CD": "0",
         }
 
