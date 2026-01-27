@@ -244,7 +244,7 @@
       method: 'GET',
       path: '/api/account/buyable',
       safe: true,
-      desc: 'KIS v1_해외주식-014 매수가능금액/수량 조회 (실전: v1_034 std_pdno 사용)',
+      desc: 'KIS v1_해외주식-014 매수가능금액/수량 조회 (실전 테스트: ITEM_CD 12자리(std_pdno) 입력 시 APBN0746 오류 이력 있음, 티커 입력은 정상)',
       params: [
         {name:'exchange', label:'거래소(Order)', type:'select', default:'NASD', options:[
           {value:'NASD',label:'NASD'},{value:'NYSE',label:'NYSE'},{value:'AMEX',label:'AMEX'},

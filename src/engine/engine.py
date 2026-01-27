@@ -968,9 +968,88 @@ class TradingEngine:
                         cancelled += 1
                 return cancelled
 
+            def _wait_for_sell_execution(sell_orders: list[dict], max_wait_time: int = 30) -> bool:
+                """매도 주문 체결 대기 및 확인 (키움 패턴: 상한선 후 종료, 미체결 취소 없음)"""
+                if not sell_orders:
+                    return True
+                try:
+                    max_wait_time = int(max_wait_time or 0)
+                except Exception:
+                    max_wait_time = 30
+                if max_wait_time <= 0:
+                    max_wait_time = 30
+
+                log.info(f"[Engine] 매도 체결 확인 대기 시작: {len(sell_orders)}건 (max={max_wait_time}s)")
+                start_time = datetime.now()
+                deadline = start_time + timedelta(seconds=max_wait_time)
+
+                while datetime.now() <= deadline:
+                    try:
+                        today = datetime.now().strftime("%Y%m%d")
+                        hist = kis_order.get_order_history(
+                            start_date=today,
+                            end_date=today,
+                            sll_buy_dvsn="01",
+                            ccld_nccs_dvsn="00",
+                            mode=mode,
+                        ) or {}
+                        rows = hist.get("output") or []
+                        rows = rows if isinstance(rows, list) else [rows]
+
+                        executed_count = 0
+                        for so in sell_orders:
+                            sym = (so.get("symbol") or "").strip().upper()
+                            qty = int(so.get("qty") or 0)
+                            if not sym or qty <= 0:
+                                continue
+                            for r in rows:
+                                if not isinstance(r, dict):
+                                    continue
+                                rsym = (r.get("pdno") or "").strip().upper()
+                                if rsym != sym:
+                                    continue
+                                try:
+                                    ccld_qty = int(float(str(r.get("ft_ccld_qty") or 0).replace(",", "")))
+                                except Exception:
+                                    ccld_qty = 0
+                                if ccld_qty >= qty:
+                                    executed_count += 1
+                                    break
+
+                        if executed_count >= len(sell_orders):
+                            log.info(f"[Engine] 매도 체결 확인 완료: {executed_count}/{len(sell_orders)}건")
+                            return True
+                        log.info(f"[Engine] 매도 체결 대기 중: {executed_count}/{len(sell_orders)}건")
+                    except Exception as e:
+                        log.warning(f"[Engine] 매도 체결 확인 중 오류: {e}")
+                    time_module.sleep(3)
+
+                log.warning(f"[Engine] 매도 체결 확인 시간 초과 ({max_wait_time}s), 계속 진행")
+                return False
+
+            def _submit_sell_market_first(symbol: str, qty: int, exchange: str, reason: str):
+                """
+                매도 주문: 시장가(가격=0) 우선 시도, 실패 시 지정가로 폴백.
+                - 실전/모의 공통: price=0, order_type='00'
+                """
+                # 1) 시장가 시도(가이드: OVRS_ORD_UNPR=0)
+                out = kis_order.order(symbol, qty, 0, 'sell', exchange=exchange, order_type='00', mode=mode)
+                if out:
+                    return out, 0.0, "market_0"
+
+                # 2) 폴백: 현재가 기반 지정가(체결 우선: -슬리피지)
+                px = kis_quote.get_current_price(exchange, symbol, mode=mode) or {}
+                sell_price = float(px.get("last", 0) or 0)
+                if sell_price <= 0:
+                    return None, 0.0, "price_unavailable"
+                sell_price = sell_price * (1.0 - (slippage_pct / 100.0))
+                out = kis_order.order(symbol, qty, sell_price, 'sell', exchange=exchange, order_type='00', mode=mode)
+                return out, float(sell_price), "limit_fallback"
+
             # 4. 매도 실행 (전략 매도)
             # 4-1. 익절/손절 감시
             sell_orders_sent = 0
+            sell_orders = []
             for symbol, info in my_stocks.items():
                 profit_rate = info['profit_rate']
                 qty = info.get('ord_psbl_qty', 0)
@@ -998,37 +1077,33 @@ class TradingEngine:
                 # 익절 조건
                 if profit_rate >= take_profit_pct:
                     log.info(f"[Engine] 익절 조건 만족: {symbol} ({profit_rate}% >= {take_profit_pct}%)")
-                    # 지정가(현재가 근사)로 매도 (price=0은 지정가에서 실패 가능)
-                    # 매도 전: 동일 종목 미체결 매도/매수 주문이 있으면 충돌/중복을 줄이기 위해 선취소(실전)
                     try:
                         _cancel_unfilled_for_symbol(exchange, symbol)
                     except Exception:
                         pass
-                    px = kis_quote.get_current_price(exchange, symbol, mode=mode) or {}
-                    sell_price = float(px.get("last", 0) or 0)
-                    if sell_price <= 0:
+                    out, sell_price, method = _submit_sell_market_first(symbol, qty, exchange, "take_profit")
+                    if not out and method == "price_unavailable":
                         log.warning(f"[Engine] {symbol} 매도가 산출 실패(현재가 0)로 익절 매도 스킵")
                         history["skips"].append({"side": "sell", "symbol": symbol, "reason": "take_profit_price_unavailable"})
                     else:
-                        # 매도는 체결 우선 -> 현재가 대비 소폭 낮게
-                        sell_price = sell_price * (1.0 - (slippage_pct / 100.0))
-                        out = kis_order.order(symbol, qty, sell_price, 'sell', exchange=exchange, order_type='00', mode=mode)
                         history["sell_attempts"].append({
                             "symbol": symbol,
                             "exchange": exchange,
                             "qty": qty,
                             "price": sell_price,
                             "reason": "take_profit",
+                            "method": method,
                             "order_no": (out or {}).get("ODNO") or (out or {}).get("odno"),
                             "ok": bool(out),
                         })
-                        sell_orders_sent += 1
-                        try:
-                            if out:
+                        if out:
+                            sell_orders_sent += 1
+                            sell_orders.append({"symbol": symbol, "qty": qty})
+                            try:
                                 sold_symbols.add((symbol or "").strip().upper())
                                 self._stop_loss_cooldown[(symbol or "").strip().upper()] = datetime.now()
-                        except Exception:
-                            pass
+                            except Exception:
+                                pass
                     # 매도했으므로 my_stocks에서 제거해야 중복 매도 방지되나, API 호출 텀이 있으므로 생략
                     continue
                     
@@ -1039,30 +1114,29 @@ class TradingEngine:
                         _cancel_unfilled_for_symbol(exchange, symbol)
                     except Exception:
                         pass
-                    px = kis_quote.get_current_price(exchange, symbol, mode=mode) or {}
-                    sell_price = float(px.get("last", 0) or 0)
-                    if sell_price <= 0:
+                    out, sell_price, method = _submit_sell_market_first(symbol, qty, exchange, "stop_loss")
+                    if not out and method == "price_unavailable":
                         log.warning(f"[Engine] {symbol} 매도가 산출 실패(현재가 0)로 손절 매도 스킵")
                         history["skips"].append({"side": "sell", "symbol": symbol, "reason": "stop_loss_price_unavailable"})
                     else:
-                        sell_price = sell_price * (1.0 - (slippage_pct / 100.0))
-                        out = kis_order.order(symbol, qty, sell_price, 'sell', exchange=exchange, order_type='00', mode=mode)
                         history["sell_attempts"].append({
                             "symbol": symbol,
                             "exchange": exchange,
                             "qty": qty,
                             "price": sell_price,
                             "reason": "stop_loss",
+                            "method": method,
                             "order_no": (out or {}).get("ODNO") or (out or {}).get("odno"),
                             "ok": bool(out),
                         })
-                        sell_orders_sent += 1
-                        try:
-                            if out:
+                        if out:
+                            sell_orders_sent += 1
+                            sell_orders.append({"symbol": symbol, "qty": qty})
+                            try:
                                 sold_symbols.add((symbol or "").strip().upper())
                                 self._stop_loss_cooldown[(symbol or "").strip().upper()] = datetime.now()
-                        except Exception:
-                            pass
+                            except Exception:
+                                pass
                     continue
 
                 # 보유기간 초과 강제매도 (로컬 추적 기반)
@@ -1078,30 +1152,29 @@ class TradingEngine:
                                     _cancel_unfilled_for_symbol(exchange, symbol)
                                 except Exception:
                                     pass
-                                px = kis_quote.get_current_price(exchange, symbol, mode=mode) or {}
-                                sell_price = float(px.get("last", 0) or 0)
-                                if sell_price <= 0:
+                                out, sell_price, method = _submit_sell_market_first(symbol, qty, exchange, "max_hold_days")
+                                if not out and method == "price_unavailable":
                                     log.warning(f"[Engine] {symbol} 매도가 산출 실패(현재가 0)로 보유기간 매도 스킵")
                                     history["skips"].append({"side": "sell", "symbol": symbol, "reason": "max_hold_price_unavailable"})
                                 else:
-                                    sell_price = sell_price * (1.0 - (slippage_pct / 100.0))
-                                    out = kis_order.order(symbol, qty, sell_price, 'sell', exchange=exchange, order_type='00', mode=mode)
                                     history["sell_attempts"].append({
                                         "symbol": symbol,
                                         "exchange": exchange,
                                         "qty": qty,
                                         "price": sell_price,
                                         "reason": "max_hold_days",
+                                        "method": method,
                                         "order_no": (out or {}).get("ODNO") or (out or {}).get("odno"),
                                         "ok": bool(out),
                                     })
-                                    sell_orders_sent += 1
-                                    try:
-                                        if out:
+                                    if out:
+                                        sell_orders_sent += 1
+                                        sell_orders.append({"symbol": symbol, "qty": qty})
+                                        try:
                                             sold_symbols.add((symbol or "").strip().upper())
                                             self._stop_loss_cooldown[(symbol or "").strip().upper()] = datetime.now()
-                                    except Exception:
-                                        pass
+                                        except Exception:
+                                            pass
                         except Exception:
                             pass
 
@@ -1110,6 +1183,7 @@ class TradingEngine:
             # 키움 패턴처럼: 매도가 있었다면 잠깐 대기 후(체결/예수금 반영) 매수 예산 산정 시 최신 잔고를 쓰도록 한다.
             present_after_sell = None
             if sell_orders_sent > 0:
+                _wait_for_sell_execution(sell_orders, max_wait_time=30)
                 time_module.sleep(2.0)
                 try:
                     present_after_sell = kis_order.get_present_balance(
@@ -1555,6 +1629,21 @@ class TradingEngine:
                                 )
                                 return True, "filled_or_removed"
 
+                            # 마지막 단계면 미체결을 남기고 종료(요청 정책)
+                            if level_idx >= (used_levels - 1):
+                                log.warning(
+                                    f"[Engine] {symbol} 마지막 호가 단계 미체결 잔량 {unfilled_qty}주 → 취소하지 않고 종료 (odno={odno})"
+                                )
+                                _trace(
+                                    "buy.ladder.unfilled_last_level_left",
+                                    symbol=symbol,
+                                    exchange=exchange,
+                                    level=int(level_idx + 1),
+                                    order_no=str(odno),
+                                    unfilled_qty=int(unfilled_qty),
+                                )
+                                return False, "unfilled_left_last_level"
+
                             # 잔량 취소 후 다음 호가로 재시도(중복 미체결 방지)
                             log.info(f"[Engine] {symbol} 미체결 잔량 {unfilled_qty}주 → 취소 후 다음 호가로 재시도 (odno={odno})")
                             _trace(
@@ -1833,15 +1922,20 @@ class TradingEngine:
 
                 exchange = stock.get("ovrs_excg_cd") or "NASD"
 
-                # 현재가 기반 지정가(체결 우선: -슬리피지)
-                px = kis_quote.get_current_price(exchange, symbol, mode=mode) or {}
-                sell_price = float(px.get("last", 0) or 0)
-                if sell_price <= 0:
-                    continue
-                sell_price = sell_price * (1.0 - (slippage_pct / 100.0))
+                # 시장가(가격=0) 우선 시도, 실패 시 지정가 폴백
+                out = kis_order.order(symbol, qty, 0, 'sell', exchange=exchange, order_type='00', mode=mode)
+                sell_price = 0.0
+                method = "market_0"
+                if not out:
+                    px = kis_quote.get_current_price(exchange, symbol, mode=mode) or {}
+                    sell_price = float(px.get("last", 0) or 0)
+                    if sell_price <= 0:
+                        continue
+                    sell_price = sell_price * (1.0 - (slippage_pct / 100.0))
+                    out = kis_order.order(symbol, qty, sell_price, 'sell', exchange=exchange, order_type='00', mode=mode)
+                    method = "limit_fallback"
 
-                log.info(f"[StopWatch] 장중 감시 매도: {symbol} qty={qty}, rate={profit_rate}%, threshold={threshold_pct}%, price={sell_price}")
-                out = kis_order.order(symbol, qty, sell_price, 'sell', exchange=exchange, order_type='00', mode=mode)
+                log.info(f"[StopWatch] 장중 감시 매도: {symbol} qty={qty}, rate={profit_rate}%, threshold={threshold_pct}%, price={sell_price}, method={method}")
                 if out:
                     self._stop_loss_cooldown[symbol] = now
 
