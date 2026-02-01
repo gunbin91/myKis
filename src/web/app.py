@@ -663,10 +663,12 @@ def get_status():
     usd_krw_rate_effective = fx.rate or 0.0
     usd_krw_rate_src = fx.source
 
-    # 보유기간(일) 계산: 가능하면 v1_007 주문체결내역으로 "최초 매수 체결일"을 추정/확정한다.
+    # 보유기간(일) 계산: v1_007 주문체결내역 동기화는 실전만 수행
+    # - mock은 ExecutionHistoryStore를 사용하므로 v1_007 호출을 생략
     # - 과도한 API 호출 방지: 1일 1회만 동기화(파일 기반 PositionStore meta)
     try:
         store = PositionStore(mode=mode)
+        history_store = ExecutionHistoryStore(mode=mode)
         today = datetime.now().strftime("%Y%m%d")
         held_symbols = []
         for s in stocks:
@@ -685,103 +687,103 @@ def get_status():
             if sym not in held_symbols:
                 store.upsert(symbol=sym, qty=0)
 
-        # api_sync_day가 오늘이어도, open_date가 detect(임시값)로 남아있으면 다시 동기화한다.
-        needs_sync = False
-        if held_symbols and (store.get_api_sync_day() != today):
-            needs_sync = True
-        if held_symbols and (not needs_sync):
-            for sym in held_symbols:
-                try:
-                    if (store.get_open_date_source(sym) or "detect") != "api":
-                        needs_sync = True
-                        break
-                except Exception:
-                    continue
+        if mode != "mock":
+            # api_sync_day가 오늘이어도, open_date가 detect(임시값)로 남아있으면 다시 동기화한다.
+            needs_sync = False
+            if held_symbols and (store.get_api_sync_day() != today):
+                needs_sync = True
+            if held_symbols and (not needs_sync):
+                for sym in held_symbols:
+                    try:
+                        if (store.get_open_date_source(sym) or "detect") != "api":
+                            needs_sync = True
+                            break
+                    except Exception:
+                        continue
 
-        if held_symbols and needs_sync:
-            # 주문체결내역 조회는 호출 제한/조회제약이 있을 수 있어, 최근 N일만 조회한다.
-            # - 모의: 범위를 너무 크게 잡으면 실패/빈값이 나오는 경우가 있어 보수적으로 짧게
-            # - 실전: 필요 시 늘릴 수 있음
-            end = today
-            lookback_days = 30 if mode == "mock" else 365
-            start = (datetime.now() - timedelta(days=lookback_days)).strftime("%Y%m%d")
-            hist = kis_order.get_order_history(start_date=start, end_date=end, mode=mode) or {}
-            rows = hist.get("output") or hist.get("output1") or []
-            rows = rows if isinstance(rows, list) else [rows]
+            if held_symbols and needs_sync:
+                # 주문체결내역 조회는 호출 제한/조회제약이 있을 수 있어, 최근 N일만 조회한다.
+                # - 실전: 필요 시 늘릴 수 있음
+                end = today
+                lookback_days = 365
+                start = (datetime.now() - timedelta(days=lookback_days)).strftime("%Y%m%d")
+                hist = kis_order.get_order_history(start_date=start, end_date=end, mode=mode) or {}
+                rows = hist.get("output") or hist.get("output1") or []
+                rows = rows if isinstance(rows, list) else [rows]
 
-            def _as_yyyymmdd(v: str | None) -> str | None:
-                if not v:
-                    return None
-                vv = str(v).strip().replace("-", "").replace(".", "")
-                return vv if len(vv) == 8 and vv.isdigit() else None
+                def _as_yyyymmdd(v: str | None) -> str | None:
+                    if not v:
+                        return None
+                    vv = str(v).strip().replace("-", "").replace(".", "")
+                    return vv if len(vv) == 8 and vv.isdigit() else None
 
-            def _is_buy(row: dict) -> bool:
-                v = str(
-                    row.get("sll_buy_dvsn")
-                    or row.get("sll_buy_dvsn_cd")
-                    or row.get("sll_buy_dvsn_name")
-                    or row.get("SLL_BUY_DVSN")
-                    or ""
-                ).strip().lower()
-                # 휴리스틱: 'buy/매수' 포함 또는 코드값이 2 계열이면 매수로 간주
-                if ("buy" in v) or ("매수" in v):
-                    return True
-                if v in ("02", "2", "buy"):
-                    return True
-                return False
+                def _is_buy(row: dict) -> bool:
+                    v = str(
+                        row.get("sll_buy_dvsn")
+                        or row.get("sll_buy_dvsn_cd")
+                        or row.get("sll_buy_dvsn_name")
+                        or row.get("SLL_BUY_DVSN")
+                        or ""
+                    ).strip().lower()
+                    # 휴리스틱: 'buy/매수' 포함 또는 코드값이 2 계열이면 매수로 간주
+                    if ("buy" in v) or ("매수" in v):
+                        return True
+                    if v in ("02", "2", "buy"):
+                        return True
+                    return False
 
-            def _filled_qty(row: dict) -> float:
-                # v1_007(주문체결내역)에서 모의/실전 필드명이 다를 수 있어 폭넓게 대응
-                for k in (
-                    "ft_ccld_qty",  # 모의: 해외체결수량
-                    "ccld_qty",
-                    "CCLD_QTY",
-                    "ccld_qty1",
-                    "ccld_qty2",
-                    "tot_ccld_qty",
-                    "tot_ccld_qty1",
-                    "ft_ord_qty",  # 최악의 폴백(주문수량)
-                ):
-                    if k in row and row.get(k) is not None:
-                        try:
-                            return float(str(row.get(k)).replace(",", ""))
-                        except Exception:
-                            pass
-                return 0.0
+                def _filled_qty(row: dict) -> float:
+                    # v1_007(주문체결내역)에서 모의/실전 필드명이 다를 수 있어 폭넓게 대응
+                    for k in (
+                        "ft_ccld_qty",  # 모의: 해외체결수량
+                        "ccld_qty",
+                        "CCLD_QTY",
+                        "ccld_qty1",
+                        "ccld_qty2",
+                        "tot_ccld_qty",
+                        "tot_ccld_qty1",
+                        "ft_ord_qty",  # 최악의 폴백(주문수량)
+                    ):
+                        if k in row and row.get(k) is not None:
+                            try:
+                                return float(str(row.get(k)).replace(",", ""))
+                            except Exception:
+                                pass
+                    return 0.0
 
-            last_buy_date: dict[str, str] = {}
-            for r in rows:
-                if not isinstance(r, dict):
-                    continue
-                sym = (r.get("pdno") or r.get("PDNO") or r.get("ovrs_pdno") or "").strip().upper()
-                if not sym or sym not in held_symbols:
-                    continue
-                if _filled_qty(r) <= 0:
-                    continue
-                if not _is_buy(r):
-                    continue
+                last_buy_date: dict[str, str] = {}
+                for r in rows:
+                    if not isinstance(r, dict):
+                        continue
+                    sym = (r.get("pdno") or r.get("PDNO") or r.get("ovrs_pdno") or "").strip().upper()
+                    if not sym or sym not in held_symbols:
+                        continue
+                    if _filled_qty(r) <= 0:
+                        continue
+                    if not _is_buy(r):
+                        continue
 
-                d = _as_yyyymmdd(
-                    r.get("trad_day")
-                    or r.get("TRAD_DAY")
-                    or r.get("ord_dt")
-                    or r.get("ORD_DT")
-                    or r.get("ccld_dt")
-                    or r.get("CCLD_DT")
-                )
-                if not d:
-                    continue
-                cur = last_buy_date.get(sym)
-                if (cur is None) or (d > cur):
-                    last_buy_date[sym] = d
+                    d = _as_yyyymmdd(
+                        r.get("trad_day")
+                        or r.get("TRAD_DAY")
+                        or r.get("ord_dt")
+                        or r.get("ORD_DT")
+                        or r.get("ccld_dt")
+                        or r.get("CCLD_DT")
+                    )
+                    if not d:
+                        continue
+                    cur = last_buy_date.get(sym)
+                    if (cur is None) or (d > cur):
+                        last_buy_date[sym] = d
 
-            updated_any = False
-            for sym, d in last_buy_date.items():
-                store.set_open_date(symbol=sym, open_date=d, source="api")
-                updated_any = True
-            # 동기화가 실제로 성공(업데이트 발생)했을 때만 api_sync_day 갱신
-            if updated_any:
-                store.set_api_sync_day(today)
+                updated_any = False
+                for sym, d in last_buy_date.items():
+                    store.set_open_date(symbol=sym, open_date=d, source="api")
+                    updated_any = True
+                # 동기화가 실제로 성공(업데이트 발생)했을 때만 api_sync_day 갱신
+                if updated_any:
+                    store.set_api_sync_day(today)
 
         # stocks에 보유기간 필드 주입
         for s in stocks:
@@ -789,7 +791,14 @@ def get_status():
                 sym = (s.get("ovrs_pdno") or "").strip().upper()
                 if not sym:
                     continue
-                od = store.get_open_date(sym)
+                od = None
+                if mode == "mock":
+                    try:
+                        od = history_store.get_last_buy_date(sym)
+                    except Exception:
+                        od = None
+                else:
+                    od = store.get_open_date(sym)
                 s["open_date"] = od
                 if od and len(od) == 8:
                     days = (datetime.now().date() - datetime.strptime(od, "%Y%m%d").date()).days
@@ -1609,8 +1618,16 @@ def _build_trade_preview_view(analysis: dict | None, mode: str) -> dict:
     try:
         from src.engine.position_store import PositionStore
         store = PositionStore(mode=mode)
+        history_store = ExecutionHistoryStore(mode=mode)
         for sym in held_map.keys():
-            od = store.get_open_date(sym)
+            od = None
+            if mode == "mock":
+                try:
+                    od = history_store.get_last_buy_date(sym)
+                except Exception:
+                    od = None
+            else:
+                od = store.get_open_date(sym)
             if od and len(od) == 8:
                 try:
                     holding_days_map[sym] = int((datetime.now().date() - datetime.strptime(od, "%Y%m%d").date()).days)
@@ -1856,6 +1873,25 @@ def api_trade_execute():
         t.start()
 
         return jsonify({"success": True, "message": "실행을 시작했습니다."})
+    except Exception as e:
+        return jsonify({"success": False, "message": str(e)})
+
+@app.route('/api/trade/sell-only', methods=['POST'])
+def api_trade_sell_only():
+    """
+    매도 전용 실행:
+    - 분석서버 호출 없이 매도 로직만 수행(매수 제외)
+    """
+    try:
+        mode = config_manager.get("common.mode", "mock")
+        if trading_engine.is_running:
+            return jsonify({"success": False, "message": "engine_running"})
+
+        import threading
+        t = threading.Thread(target=trading_engine.run_once_sell_only, args=(mode,))
+        t.start()
+
+        return jsonify({"success": True, "message": "매도 전용 실행을 시작했습니다."})
     except Exception as e:
         return jsonify({"success": False, "message": str(e)})
 

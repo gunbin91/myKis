@@ -142,6 +142,20 @@ class KisAuth:
         finally:
             self._release_process_issue_lock(lock_path)
 
+    def invalidate_token(self, mode: str | None = None) -> None:
+        """
+        토큰 강제 무효화:
+        - 서버가 만료 토큰(EGW00123)을 반환하는 경우 재발급 유도용
+        """
+        if mode is None:
+            mode = config_manager.get('common.mode', 'mock')
+        try:
+            if mode in self.access_tokens:
+                self.access_tokens[mode]['token'] = None
+                self.access_tokens[mode]['expired_at'] = None
+        except Exception:
+            pass
+
     # ---- process-wide (cross-process) helpers ----
 
     def _token_meta_path(self, mode: str) -> Path:

@@ -5,9 +5,36 @@ from datetime import datetime
 from decimal import Decimal, InvalidOperation, ROUND_DOWN
 from src.config.config_manager import config_manager
 from src.api.auth import kis_auth
-from src.utils.logger import logger, get_mode_logger
+from src.utils.logger import logger, get_mode_logger, log_engine_api
 from src.api.exchange import normalize_order_exchange
 from src.api.quote import kis_quote
+
+
+def _log_engine_api_if_needed(caller: str | None, mode: str, payload: dict):
+    if caller and str(caller).strip().upper() == "ENGINE":
+        log_engine_api(mode, payload)
+
+def _is_expired_token_response(payload: dict) -> bool:
+    try:
+        msg_cd = str(payload.get("msg_cd") or "").strip()
+        msg1 = str(payload.get("msg1") or "")
+        if msg_cd == "EGW00123":
+            return True
+        if "기간이 만료된 token" in msg1:
+            return True
+    except Exception:
+        pass
+    return False
+
+def _retry_on_expired_token(payload: dict, mode: str, attempt: int, max_attempts: int) -> bool:
+    if _is_expired_token_response(payload) and attempt < (max_attempts - 1):
+        try:
+            kis_auth.invalidate_token(mode)
+        except Exception:
+            pass
+        time.sleep(0.3 * (attempt + 1))
+        return True
+    return False
 
 class KisOrder:
     def __init__(self):
@@ -154,7 +181,7 @@ class KisOrder:
         acnt_prdt_cd = config_manager.get(f'{mode}.account_no_suffix')
         return cano, acnt_prdt_cd
 
-    def get_balance(self, exchange='NASD', currency='USD', mode=None):
+    def get_balance(self, exchange='NASD', currency='USD', mode=None, caller: str | None = None):
         """
         해외주식 잔고 조회 (v1_해외주식-006)
         """
@@ -200,18 +227,42 @@ class KisOrder:
                 res = requests.get(url, headers=headers, params=params, timeout=20)
                 if res.status_code == 200:
                     data = res.json()
+                    if _retry_on_expired_token(data, mode, attempt, 3):
+                        continue
                     if data.get('rt_cd') == '0':
+                        _log_engine_api_if_needed(caller, mode, {
+                            "ts": datetime.now().isoformat(timespec="seconds"),
+                            "api": "v1_006",
+                            "method": "GET",
+                            "url": url,
+                            "headers": headers,
+                            "params": params,
+                            "status": res.status_code,
+                            "response": data,
+                        })
                         return data
                     if data.get("msg_cd") == "EGW00201":
                         time.sleep(0.3 * (attempt + 1))
                         continue
                     log.error(f"[Order] 잔고 조회 실패: {data.get('msg1')} ({data.get('msg_cd')})")
+                    _log_engine_api_if_needed(caller, mode, {
+                        "ts": datetime.now().isoformat(timespec="seconds"),
+                        "api": "v1_006",
+                        "method": "GET",
+                        "url": url,
+                        "headers": headers,
+                        "params": params,
+                        "status": res.status_code,
+                        "response": data,
+                    })
                     return None
 
                 if res.status_code == 500:
                     # 초당 제한은 500으로 내려오는 케이스가 있음
                     try:
                         data = res.json() or {}
+                        if _retry_on_expired_token(data, mode, attempt, 3):
+                            continue
                         if data.get("msg_cd") == "EGW00201":
                             time.sleep(0.3 * (attempt + 1))
                             continue
@@ -219,12 +270,31 @@ class KisOrder:
                         pass
 
                 log.error(f"[Order] API 호출 오류: {res.status_code} - {res.text}")
+                _log_engine_api_if_needed(caller, mode, {
+                    "ts": datetime.now().isoformat(timespec="seconds"),
+                    "api": "v1_006",
+                    "method": "GET",
+                    "url": url,
+                    "headers": headers,
+                    "params": params,
+                    "status": res.status_code,
+                    "response": res.text,
+                })
                 return None
             except Exception as e:
                 if attempt < 2:
                     time.sleep(0.3 * (attempt + 1))
                     continue
                 log.error(f"[Order] 잔고 조회 중 예외 발생: {e}")
+                _log_engine_api_if_needed(caller, mode, {
+                    "ts": datetime.now().isoformat(timespec="seconds"),
+                    "api": "v1_006",
+                    "method": "GET",
+                    "url": url,
+                    "headers": headers,
+                    "params": params,
+                    "error": str(e),
+                })
                 return None
 
     def get_present_balance(
@@ -281,17 +351,41 @@ class KisOrder:
                 res = requests.get(url, headers=headers, params=params, timeout=20)
                 if res.status_code == 200:
                     data = res.json()
+                    if _retry_on_expired_token(data, mode, attempt, 3):
+                        continue
                     if data.get('rt_cd') == '0':
+                        _log_engine_api_if_needed(caller, mode, {
+                            "ts": datetime.now().isoformat(timespec="seconds"),
+                            "api": "v1_008",
+                            "method": "GET",
+                            "url": url,
+                            "headers": headers,
+                            "params": params,
+                            "status": res.status_code,
+                            "response": data,
+                        })
                         return data
                     if data.get("msg_cd") == "EGW00201":
                         time.sleep(0.3 * (attempt + 1))
                         continue
                     log.error(f"[Order] 체결기준현재잔고 조회 실패: {data.get('msg1')} ({data.get('msg_cd')})")
+                    _log_engine_api_if_needed(caller, mode, {
+                        "ts": datetime.now().isoformat(timespec="seconds"),
+                        "api": "v1_008",
+                        "method": "GET",
+                        "url": url,
+                        "headers": headers,
+                        "params": params,
+                        "status": res.status_code,
+                        "response": data,
+                    })
                     return None
 
                 if res.status_code == 500:
                     try:
                         data = res.json() or {}
+                        if _retry_on_expired_token(data, mode, attempt, 3):
+                            continue
                         if data.get("msg_cd") == "EGW00201":
                             time.sleep(0.3 * (attempt + 1))
                             continue
@@ -299,12 +393,31 @@ class KisOrder:
                         pass
 
                 log.error(f"[Order] API 호출 오류: {res.status_code} - {res.text}")
+                _log_engine_api_if_needed(caller, mode, {
+                    "ts": datetime.now().isoformat(timespec="seconds"),
+                    "api": "v1_008",
+                    "method": "GET",
+                    "url": url,
+                    "headers": headers,
+                    "params": params,
+                    "status": res.status_code,
+                    "response": res.text,
+                })
                 return None
             except Exception as e:
                 if attempt < 2:
                     time.sleep(0.3 * (attempt + 1))
                     continue
                 log.error(f"[Order] 체결기준현재잔고 조회 중 예외 발생: {e}")
+                _log_engine_api_if_needed(caller, mode, {
+                    "ts": datetime.now().isoformat(timespec="seconds"),
+                    "api": "v1_008",
+                    "method": "GET",
+                    "url": url,
+                    "headers": headers,
+                    "params": params,
+                    "error": str(e),
+                })
                 return None
 
     def get_foreign_margin(self, mode=None, caller: str | None = None):
@@ -357,7 +470,19 @@ class KisOrder:
                 res = requests.get(url, headers=headers, params=params, timeout=20)
                 if res.status_code == 200:
                     data = res.json()
+                    if _retry_on_expired_token(data, mode, attempt, 5):
+                        continue
                     if data.get("rt_cd") == "0":
+                        _log_engine_api_if_needed(caller, mode, {
+                            "ts": datetime.now().isoformat(timespec="seconds"),
+                            "api": "v1_035",
+                            "method": "GET",
+                            "url": url,
+                            "headers": headers,
+                            "params": params,
+                            "status": res.status_code,
+                            "response": data,
+                        })
                         return data
                     if data.get("msg_cd") == "EGW00201":
                         time.sleep(0.5 * (attempt + 1))
@@ -366,11 +491,23 @@ class KisOrder:
                         time.sleep(0.7 * (attempt + 1))
                         continue
                     log.error(f"[Order] 해외증거금 통화별조회 실패: {data.get('msg1')} ({data.get('msg_cd')})")
+                    _log_engine_api_if_needed(caller, mode, {
+                        "ts": datetime.now().isoformat(timespec="seconds"),
+                        "api": "v1_035",
+                        "method": "GET",
+                        "url": url,
+                        "headers": headers,
+                        "params": params,
+                        "status": res.status_code,
+                        "response": data,
+                    })
                     return None
 
                 if res.status_code == 500:
                     try:
                         data = res.json() or {}
+                        if _retry_on_expired_token(data, mode, attempt, 5):
+                            continue
                         if data.get("msg_cd") == "EGW00201":
                             time.sleep(0.5 * (attempt + 1))
                             continue
@@ -381,15 +518,34 @@ class KisOrder:
                         pass
 
                 log.error(f"[Order] 해외증거금 통화별조회 API 호출 오류: {res.status_code} - {res.text}")
+                _log_engine_api_if_needed(caller, mode, {
+                    "ts": datetime.now().isoformat(timespec="seconds"),
+                    "api": "v1_035",
+                    "method": "GET",
+                    "url": url,
+                    "headers": headers,
+                    "params": params,
+                    "status": res.status_code,
+                    "response": res.text,
+                })
                 return None
             except Exception as e:
                 if attempt < 2:
                     time.sleep(0.3 * (attempt + 1))
                     continue
                 log.error(f"[Order] 해외증거금 통화별조회 중 예외 발생: {e}")
+                _log_engine_api_if_needed(caller, mode, {
+                    "ts": datetime.now().isoformat(timespec="seconds"),
+                    "api": "v1_035",
+                    "method": "GET",
+                    "url": url,
+                    "headers": headers,
+                    "params": params,
+                    "error": str(e),
+                })
                 return None
 
-    def get_unfilled_orders(self, exchange='NASD', mode=None):
+    def get_unfilled_orders(self, exchange='NASD', mode=None, caller: str | None = None):
         """
         해외주식 미체결 내역 조회 (v1_해외주식-005)
         모의투자는 지원하지 않음 (대신 체결내역 API 사용 권장되나 여기선 스킵)
@@ -429,23 +585,73 @@ class KisOrder:
             "CTX_AREA_NK200": ""
         }
         
-        try:
-            res = requests.get(url, headers=headers, params=params, timeout=20)
-            if res.status_code == 200:
-                data = res.json()
-                if data['rt_cd'] == '0':
-                    return data['output']
-                else:
+        for attempt in range(2):
+            try:
+                res = requests.get(url, headers=headers, params=params, timeout=20)
+                if res.status_code == 200:
+                    data = res.json()
+                    if _retry_on_expired_token(data, mode, attempt, 2):
+                        continue
+                    if data['rt_cd'] == '0':
+                        _log_engine_api_if_needed(caller, mode, {
+                            "ts": datetime.now().isoformat(timespec="seconds"),
+                            "api": "v1_005",
+                            "method": "GET",
+                            "url": url,
+                            "headers": headers,
+                            "params": params,
+                            "status": res.status_code,
+                            "response": data,
+                        })
+                        return data['output']
                     log.error(f"[Order] 미체결 조회 실패: {data['msg1']} ({data['msg_cd']})")
+                    _log_engine_api_if_needed(caller, mode, {
+                        "ts": datetime.now().isoformat(timespec="seconds"),
+                        "api": "v1_005",
+                        "method": "GET",
+                        "url": url,
+                        "headers": headers,
+                        "params": params,
+                        "status": res.status_code,
+                        "response": data,
+                    })
                     return None
-            else:
+                if res.status_code == 500:
+                    try:
+                        data = res.json() or {}
+                        if _retry_on_expired_token(data, mode, attempt, 2):
+                            continue
+                    except Exception:
+                        pass
                 log.error(f"[Order] API 호출 오류: {res.status_code} - {res.text}")
+                _log_engine_api_if_needed(caller, mode, {
+                    "ts": datetime.now().isoformat(timespec="seconds"),
+                    "api": "v1_005",
+                    "method": "GET",
+                    "url": url,
+                    "headers": headers,
+                    "params": params,
+                    "status": res.status_code,
+                    "response": res.text,
+                })
                 return None
-        except Exception as e:
-            log.error(f"[Order] 미체결 조회 중 예외 발생: {e}")
-            return None
+            except Exception as e:
+                if attempt < 1:
+                    time.sleep(0.3 * (attempt + 1))
+                    continue
+                log.error(f"[Order] 미체결 조회 중 예외 발생: {e}")
+                _log_engine_api_if_needed(caller, mode, {
+                    "ts": datetime.now().isoformat(timespec="seconds"),
+                    "api": "v1_005",
+                    "method": "GET",
+                    "url": url,
+                    "headers": headers,
+                    "params": params,
+                    "error": str(e),
+                })
+                return None
 
-    def order(self, symbol, quantity, price, side='buy', exchange='NASD', order_type='00', mode=None):
+    def order(self, symbol, quantity, price, side='buy', exchange='NASD', order_type='00', mode=None, caller: str | None = None):
         """
         해외주식 주문 (v1_해외주식-001)
         :param symbol: 종목코드 (티커)
@@ -506,15 +712,39 @@ class KisOrder:
 
                 if res.status_code == 200:
                     data = res.json()
+                    if _retry_on_expired_token(data, mode, attempt, 3):
+                        continue
                     if data.get('rt_cd') == '0':
                         log.info(f"[Order] 주문 성공: {data.get('msg1')} (주문번호: {data.get('output', {}).get('ODNO')})")
+                        _log_engine_api_if_needed(caller, mode, {
+                            "ts": datetime.now().isoformat(timespec="seconds"),
+                            "api": "v1_001",
+                            "method": "POST",
+                            "url": url,
+                            "headers": headers,
+                            "body": body,
+                            "status": res.status_code,
+                            "response": data,
+                        })
                         return data.get('output')
                     log.error(f"[Order] 주문 실패: {data.get('msg1')} ({data.get('msg_cd')})")
+                    _log_engine_api_if_needed(caller, mode, {
+                        "ts": datetime.now().isoformat(timespec="seconds"),
+                        "api": "v1_001",
+                        "method": "POST",
+                        "url": url,
+                        "headers": headers,
+                        "body": body,
+                        "status": res.status_code,
+                        "response": data,
+                    })
                     return None
 
                 if res.status_code == 500:
                     try:
                         data = res.json() or {}
+                        if _retry_on_expired_token(data, mode, attempt, 3):
+                            continue
                         if data.get("msg_cd") == "EGW00201":
                             time.sleep(0.3 * (attempt + 1))
                             continue
@@ -522,12 +752,31 @@ class KisOrder:
                         pass
 
                 log.error(f"[Order] API 호출 오류: {res.status_code} - {res.text}")
+                _log_engine_api_if_needed(caller, mode, {
+                    "ts": datetime.now().isoformat(timespec="seconds"),
+                    "api": "v1_001",
+                    "method": "POST",
+                    "url": url,
+                    "headers": headers,
+                    "body": body,
+                    "status": res.status_code,
+                    "response": res.text,
+                })
                 return None
             except Exception as e:
                 if attempt < 2:
                     time.sleep(0.3 * (attempt + 1))
                     continue
                 log.error(f"[Order] 주문 요청 중 예외 발생: {e}")
+                _log_engine_api_if_needed(caller, mode, {
+                    "ts": datetime.now().isoformat(timespec="seconds"),
+                    "api": "v1_001",
+                    "method": "POST",
+                    "url": url,
+                    "headers": headers,
+                    "body": body,
+                    "error": str(e),
+                })
                 return None
 
     def revise_cancel_order(
@@ -539,6 +788,7 @@ class KisOrder:
         price: float,
         action: str = "cancel",
         mode: str | None = None,
+        caller: str | None = None,
     ):
         """
         해외주식 정정취소주문 (v1_해외주식-003)
@@ -589,20 +839,72 @@ class KisOrder:
             "ORD_SVR_DVSN_CD": "0",
         }
 
-        try:
-            res = requests.post(url, headers=headers, data=json.dumps(body), timeout=20)
-            if res.status_code != 200:
-                log.error(f"[Order] 정정/취소 API 호출 오류: {res.status_code} - {res.text}")
-                return None
+        for attempt in range(2):
+            try:
+                res = requests.post(url, headers=headers, data=json.dumps(body), timeout=20)
+                if res.status_code != 200:
+                    if res.status_code == 500:
+                        try:
+                            data = res.json() or {}
+                            if _retry_on_expired_token(data, mode, attempt, 2):
+                                continue
+                        except Exception:
+                            pass
+                    log.error(f"[Order] 정정/취소 API 호출 오류: {res.status_code} - {res.text}")
+                    _log_engine_api_if_needed(caller, mode, {
+                        "ts": datetime.now().isoformat(timespec="seconds"),
+                        "api": "v1_003",
+                        "method": "POST",
+                        "url": url,
+                        "headers": headers,
+                        "body": body,
+                        "status": res.status_code,
+                        "response": res.text,
+                    })
+                    return None
 
-            data = res.json()
-            if data.get("rt_cd") == "0":
-                return data.get("output")
-            log.error(f"[Order] 정정/취소 실패: {data.get('msg1')} ({data.get('msg_cd')})")
-            return None
-        except Exception as e:
-            log.error(f"[Order] 정정/취소 중 예외 발생: {e}")
-            return None
+                data = res.json()
+                if _retry_on_expired_token(data, mode, attempt, 2):
+                    continue
+                if data.get("rt_cd") == "0":
+                    _log_engine_api_if_needed(caller, mode, {
+                        "ts": datetime.now().isoformat(timespec="seconds"),
+                        "api": "v1_003",
+                        "method": "POST",
+                        "url": url,
+                        "headers": headers,
+                        "body": body,
+                        "status": res.status_code,
+                        "response": data,
+                    })
+                    return data.get("output")
+                log.error(f"[Order] 정정/취소 실패: {data.get('msg1')} ({data.get('msg_cd')})")
+                _log_engine_api_if_needed(caller, mode, {
+                    "ts": datetime.now().isoformat(timespec="seconds"),
+                    "api": "v1_003",
+                    "method": "POST",
+                    "url": url,
+                    "headers": headers,
+                    "body": body,
+                    "status": res.status_code,
+                    "response": data,
+                })
+                return None
+            except Exception as e:
+                if attempt < 1:
+                    time.sleep(0.3 * (attempt + 1))
+                    continue
+                log.error(f"[Order] 정정/취소 중 예외 발생: {e}")
+                _log_engine_api_if_needed(caller, mode, {
+                    "ts": datetime.now().isoformat(timespec="seconds"),
+                    "api": "v1_003",
+                    "method": "POST",
+                    "url": url,
+                    "headers": headers,
+                    "body": body,
+                    "error": str(e),
+                })
+                return None
 
     def get_buyable_amount(
         self,
@@ -611,6 +913,7 @@ class KisOrder:
         price: float,
         mode: str | None = None,
         debug: bool = False,
+        caller: str | None = None,
     ):
         """
         해외주식 매수가능금액조회 (v1_해외주식-014)
@@ -714,7 +1017,19 @@ class KisOrder:
                 res = requests.get(url, headers=headers, params=params, timeout=20)
                 if res.status_code == 200:
                     data = res.json()
+                    if _retry_on_expired_token(data, mode, attempt, 2):
+                        continue
                     if data.get("rt_cd") == "0":
+                        _log_engine_api_if_needed(caller, mode, {
+                            "ts": datetime.now().isoformat(timespec="seconds"),
+                            "api": "v1_014",
+                            "method": "GET",
+                            "url": url,
+                            "headers": headers,
+                            "params": params,
+                            "status": res.status_code,
+                            "response": data,
+                        })
                         return data.get("output")
                     if data.get("msg_cd") == "EGW00201":
                         time.sleep(0.3 * (attempt + 1))
@@ -732,11 +1047,23 @@ class KisOrder:
                             log.error(f"[Order] 매수가능금액조회 실패: {data.get('msg1')} ({data.get('msg_cd')})")
                     except Exception:
                         log.error(f"[Order] 매수가능금액조회 실패: {data.get('msg1')} ({data.get('msg_cd')})")
+                    _log_engine_api_if_needed(caller, mode, {
+                        "ts": datetime.now().isoformat(timespec="seconds"),
+                        "api": "v1_014",
+                        "method": "GET",
+                        "url": url,
+                        "headers": headers,
+                        "params": params,
+                        "status": res.status_code,
+                        "response": data,
+                    })
                     return _debug_error(msg_cd=data.get("msg_cd"), msg1=data.get("msg1"), http_status=200) or None
 
                 if res.status_code == 500:
                     try:
                         data = res.json() or {}
+                        if _retry_on_expired_token(data, mode, attempt, 2):
+                            continue
                         if data.get("msg_cd") == "EGW00201":
                             time.sleep(0.3 * (attempt + 1))
                             continue
@@ -745,12 +1072,31 @@ class KisOrder:
                         pass
 
                 log.error(f"[Order] 매수가능금액조회 API 호출 오류: {res.status_code} - {res.text}")
+                _log_engine_api_if_needed(caller, mode, {
+                    "ts": datetime.now().isoformat(timespec="seconds"),
+                    "api": "v1_014",
+                    "method": "GET",
+                    "url": url,
+                    "headers": headers,
+                    "params": params,
+                    "status": res.status_code,
+                    "response": res.text,
+                })
                 return _debug_error(http_status=res.status_code, detail=res.text) or None
             except Exception as e:
                 if attempt < 1:
                     time.sleep(0.3 * (attempt + 1))
                     continue
                 log.error(f"[Order] 매수가능금액조회 중 예외 발생: {e}")
+                _log_engine_api_if_needed(caller, mode, {
+                    "ts": datetime.now().isoformat(timespec="seconds"),
+                    "api": "v1_014",
+                    "method": "GET",
+                    "url": url,
+                    "headers": headers,
+                    "params": params,
+                    "error": str(e),
+                })
                 return _debug_error(detail=str(e)) or None
 
     def get_order_history(
@@ -765,6 +1111,7 @@ class KisOrder:
         mode: str | None = None,
         ctx_area_nk200: str = "",
         ctx_area_fk200: str = "",
+        caller: str | None = None,
     ):
         """
         해외주식 주문체결내역 (v1_해외주식-007)
@@ -842,6 +1189,8 @@ class KisOrder:
                         # 초당 제한은 500으로 내려오는 케이스가 많음
                         try:
                             jd = res.json() or {}
+                            if _retry_on_expired_token(jd, mode, attempt, 3):
+                                continue
                             if jd.get("msg_cd") == "EGW00201":
                                 time.sleep(0.3 * (attempt + 1))
                                 continue
@@ -855,7 +1204,20 @@ class KisOrder:
                         return None
 
                     data = res.json()
+                    if _retry_on_expired_token(data, mode, attempt, 3):
+                        continue
                     if data.get("rt_cd") == "0":
+                        _log_engine_api_if_needed(caller, mode, {
+                            "ts": datetime.now().isoformat(timespec="seconds"),
+                            "api": "v1_007",
+                            "method": "GET",
+                            "url": url,
+                            "headers": headers,
+                            "params": params,
+                            "status": res.status_code,
+                            "response": data,
+                            "tr_cont": res.headers.get("tr_cont"),
+                        })
                         break
 
                     # vts/실전에서 초당 제한이 걸리면 재시도
@@ -864,6 +1226,16 @@ class KisOrder:
                         continue
 
                     log.error(f"[Order] 주문체결내역 조회 실패: {data.get('msg1')} ({data.get('msg_cd')})")
+                    _log_engine_api_if_needed(caller, mode, {
+                        "ts": datetime.now().isoformat(timespec="seconds"),
+                        "api": "v1_007",
+                        "method": "GET",
+                        "url": url,
+                        "headers": headers,
+                        "params": params,
+                        "status": res.status_code,
+                        "response": data,
+                    })
                     return None
 
                 if not data or data.get("rt_cd") != "0":

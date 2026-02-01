@@ -37,6 +37,13 @@
             font-size: 0.9rem;
             border: 1px solid #30363d;
         }
+        /* 한국 주식 시장 관례 색상 (상승: 빨간색, 하락: 파란색) */
+        .text-up {
+            color: #dc3545 !important;
+        }
+        .text-down {
+            color: #0d6efd !important;
+        }
     </style>
 </head>
 <body>
@@ -90,6 +97,7 @@
                     </div>
                     <div class="small text-muted me-2" id="currency-fx-text" style="min-width: 180px;"></div>
                     <button class="btn btn-sm btn-outline-success" onclick="openTradePreview()"><i class="fas fa-play me-1"></i>즉시 실행</button>
+                    <button class="btn btn-sm btn-outline-danger ms-2" onclick="runSellOnly()"><i class="fas fa-hand-holding-dollar me-1"></i>자동매도 실행</button>
                 </div>
             </div>
         </div>
@@ -661,6 +669,21 @@
                 document.getElementById('preview-meta').textContent = '미리보기 오류: ' + err;
                 _setExecuteButtonState(false, '미리보기 오류(다시 시도)');
               });
+        }
+
+        function runSellOnly(){
+            const ok = confirm('분석서버 호출 없이 매도 로직만 1회 실행할까요?\n\n- 매수 로직은 실행되지 않습니다.\n- 현재 보유 종목 기준으로 매도 조건만 평가됩니다.');
+            if(!ok) return;
+            fetch('/api/trade/sell-only', { method: 'POST' })
+              .then(r=>r.json())
+              .then(resp=>{
+                if(resp.success){
+                    alert(resp.message || '매도 전용 실행 시작');
+                }else{
+                    alert('실행 실패: ' + (resp.message || 'unknown'));
+                }
+              })
+              .catch(err=>alert('실행 오류: ' + err));
         }
 
         document.getElementById('btn-preview-execute').addEventListener('click', function(){

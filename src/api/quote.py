@@ -3,8 +3,35 @@ import json
 import time
 from src.config.config_manager import config_manager
 from src.api.auth import kis_auth
-from src.utils.logger import logger, get_mode_logger
+from src.utils.logger import logger, get_mode_logger, log_engine_api
 from src.api.exchange import normalize_quote_exchange, normalize_order_exchange
+
+
+def _log_engine_api_if_needed(caller: str | None, mode: str, payload: dict):
+    if caller and str(caller).strip().upper() == "ENGINE":
+        log_engine_api(mode, payload)
+
+def _is_expired_token_response(payload: dict) -> bool:
+    try:
+        msg_cd = str(payload.get("msg_cd") or "").strip()
+        msg1 = str(payload.get("msg1") or "")
+        if msg_cd == "EGW00123":
+            return True
+        if "기간이 만료된 token" in msg1:
+            return True
+    except Exception:
+        pass
+    return False
+
+def _retry_on_expired_token(payload: dict, mode: str, attempt: int, max_attempts: int) -> bool:
+    if _is_expired_token_response(payload) and attempt < (max_attempts - 1):
+        try:
+            kis_auth.invalidate_token(mode)
+        except Exception:
+            pass
+        time.sleep(0.3 * (attempt + 1))
+        return True
+    return False
 
 class KisQuote:
     def __init__(self):
@@ -26,7 +53,7 @@ class KisQuote:
             "SZAA": "552",
         }.get(ex)
 
-    def get_current_price(self, exchange, symbol, mode=None):
+    def get_current_price(self, exchange, symbol, mode=None, caller: str | None = None):
         """
         해외주식 현재체결가 (v1_해외주식-009)
         :param exchange: 거래소코드 (NAS:나스닥, NYS:뉴욕, AMS:아멕스)
@@ -65,15 +92,39 @@ class KisQuote:
                 res = requests.get(url, headers=headers, params=params, timeout=20)
                 if res.status_code == 200:
                     data = res.json()
+                    if _retry_on_expired_token(data, mode, attempt, 3):
+                        continue
                     if data.get('rt_cd') == '0':
+                        _log_engine_api_if_needed(caller, mode, {
+                            "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                            "api": "v1_009",
+                            "method": "GET",
+                            "url": url,
+                            "headers": headers,
+                            "params": params,
+                            "status": res.status_code,
+                            "response": data,
+                        })
                         return data.get('output')
                     log.error(f"[Quote] 현재가 조회 실패: {data.get('msg1')} ({data.get('msg_cd')})")
+                    _log_engine_api_if_needed(caller, mode, {
+                        "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                        "api": "v1_009",
+                        "method": "GET",
+                        "url": url,
+                        "headers": headers,
+                        "params": params,
+                        "status": res.status_code,
+                        "response": data,
+                    })
                     return None
 
                 # 500이면서 초당 제한이면 backoff 후 재시도
                 if res.status_code == 500:
                     try:
                         data = res.json() or {}
+                        if _retry_on_expired_token(data, mode, attempt, 3):
+                            continue
                         if data.get("msg_cd") == "EGW00201":
                             time.sleep(0.3 * (attempt + 1))
                             continue
@@ -81,6 +132,16 @@ class KisQuote:
                         pass
 
                 log.error(f"[Quote] API 호출 오류: {res.status_code} - {res.text}")
+                _log_engine_api_if_needed(caller, mode, {
+                    "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                    "api": "v1_009",
+                    "method": "GET",
+                    "url": url,
+                    "headers": headers,
+                    "params": params,
+                    "status": res.status_code,
+                    "response": res.text,
+                })
                 return None
             except Exception as e:
                 # 네트워크 순간 오류는 짧게 재시도
@@ -88,6 +149,15 @@ class KisQuote:
                     time.sleep(0.3 * (attempt + 1))
                     continue
                 log.error(f"[Quote] 현재가 조회 중 예외 발생: {e}")
+                _log_engine_api_if_needed(caller, mode, {
+                    "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                    "api": "v1_009",
+                    "method": "GET",
+                    "url": url,
+                    "headers": headers,
+                    "params": params,
+                    "error": str(e),
+                })
                 return None
 
     def get_price_detail(self, exchange, symbol, mode=None):
@@ -135,6 +205,8 @@ class KisQuote:
                 res = requests.get(url, headers=headers, params=params, timeout=20)
                 if res.status_code == 200:
                     data = res.json()
+                    if _retry_on_expired_token(data, mode, attempt, 3):
+                        continue
                     if data.get('rt_cd') == '0':
                         return data.get('output')
                     if data.get("msg_cd") == "EGW00201":
@@ -146,6 +218,8 @@ class KisQuote:
                 if res.status_code == 500:
                     try:
                         data = res.json() or {}
+                        if _retry_on_expired_token(data, mode, attempt, 3):
+                            continue
                         if data.get("msg_cd") == "EGW00201":
                             time.sleep(0.3 * (attempt + 1))
                             continue
@@ -161,7 +235,7 @@ class KisQuote:
                 log.error(f"[Quote] 상세 조회 중 예외 발생: {e}")
                 return None
 
-    def get_asking_price(self, exchange, symbol, mode=None):
+    def get_asking_price(self, exchange, symbol, mode=None, caller: str | None = None):
         """
         해외주식 현재가 호가 (해외주식-033)
 
@@ -207,17 +281,41 @@ class KisQuote:
                 res = requests.get(url, headers=headers, params=params, timeout=20)
                 if res.status_code == 200:
                     data = res.json()
+                    if _retry_on_expired_token(data, mode, attempt, 3):
+                        continue
                     if data.get("rt_cd") == "0":
+                        _log_engine_api_if_needed(caller, mode, {
+                            "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                            "api": "v1_033",
+                            "method": "GET",
+                            "url": url,
+                            "headers": headers,
+                            "params": params,
+                            "status": res.status_code,
+                            "response": data,
+                        })
                         return data
                     if data.get("msg_cd") == "EGW00201":
                         time.sleep(0.3 * (attempt + 1))
                         continue
                     log.error(f"[Quote] 호가 조회 실패: {data.get('msg1')} ({data.get('msg_cd')})")
+                    _log_engine_api_if_needed(caller, mode, {
+                        "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                        "api": "v1_033",
+                        "method": "GET",
+                        "url": url,
+                        "headers": headers,
+                        "params": params,
+                        "status": res.status_code,
+                        "response": data,
+                    })
                     return None
 
                 if res.status_code == 500:
                     try:
                         data = res.json() or {}
+                        if _retry_on_expired_token(data, mode, attempt, 3):
+                            continue
                         if data.get("msg_cd") == "EGW00201":
                             time.sleep(0.3 * (attempt + 1))
                             continue
@@ -225,12 +323,31 @@ class KisQuote:
                         pass
 
                 log.error(f"[Quote] API 호출 오류: {res.status_code} - {res.text}")
+                _log_engine_api_if_needed(caller, mode, {
+                    "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                    "api": "v1_033",
+                    "method": "GET",
+                    "url": url,
+                    "headers": headers,
+                    "params": params,
+                    "status": res.status_code,
+                    "response": res.text,
+                })
                 return None
             except Exception as e:
                 if attempt < 2:
                     time.sleep(0.3 * (attempt + 1))
                     continue
                 log.error(f"[Quote] 호가 조회 중 예외 발생: {e}")
+                _log_engine_api_if_needed(caller, mode, {
+                    "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                    "api": "v1_033",
+                    "method": "GET",
+                    "url": url,
+                    "headers": headers,
+                    "params": params,
+                    "error": str(e),
+                })
                 return None
 
     def get_product_info(self, exchange, symbol, mode=None):
@@ -276,6 +393,8 @@ class KisQuote:
                 res = requests.get(url, headers=headers, params=params, timeout=20)
                 if res.status_code == 200:
                     data = res.json()
+                    if _retry_on_expired_token(data, mode, attempt, 3):
+                        continue
                     if data.get("rt_cd") == "0":
                         return data.get("output")
                     if data.get("msg_cd") == "EGW00201":
@@ -287,6 +406,8 @@ class KisQuote:
                 if res.status_code == 500:
                     try:
                         data = res.json() or {}
+                        if _retry_on_expired_token(data, mode, attempt, 3):
+                            continue
                         if data.get("msg_cd") == "EGW00201":
                             time.sleep(0.3 * (attempt + 1))
                             continue

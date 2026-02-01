@@ -1,9 +1,11 @@
+import json
 import logging
 import os
 import sys
 from datetime import datetime
 
 _LOGGER_CACHE = {}
+_ENGINE_API_LOGGING_ENABLED = {}
 
 def _ensure_dir(path: str):
     if not os.path.exists(path):
@@ -90,4 +92,36 @@ def get_mode_logger(mode: str, source: str | None = None):
 
 # 기본 로거 인스턴스
 logger = setup_logger()
+
+
+def log_engine_api(mode: str, payload: dict):
+    """
+    자동매매(ENGINE) API 요청/응답 로깅.
+    - logs/api/{mode}/engine_YYYYMMDD.jsonl
+    """
+    try:
+        mode = (mode or "unknown").strip().lower()
+        if not _ENGINE_API_LOGGING_ENABLED.get(mode, False):
+            return
+        PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        log_dir = os.path.join(PROJECT_ROOT, "logs", "api", mode)
+        _ensure_dir(log_dir)
+        today = datetime.now().strftime("%Y%m%d")
+        log_file = os.path.join(log_dir, f"engine_{today}.jsonl")
+        with open(log_file, "a", encoding="utf-8") as f:
+            f.write(json.dumps(payload or {}, ensure_ascii=False, default=str) + "\n")
+    except Exception:
+        # 로깅 실패는 매매 실패로 간주하지 않음
+        pass
+
+def set_engine_api_logging(mode: str, enabled: bool) -> None:
+    """
+    엔진 API 로깅 on/off.
+    - 실제 자동매매 실행 구간에서만 기록하도록 제어
+    """
+    try:
+        m = (mode or "unknown").strip().lower()
+        _ENGINE_API_LOGGING_ENABLED[m] = bool(enabled)
+    except Exception:
+        pass
 

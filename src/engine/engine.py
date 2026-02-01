@@ -7,7 +7,7 @@ from src.api.order import kis_order
 from src.api.quote import kis_quote
 from src.api.auth import kis_auth
 from src.api.exchange import normalize_analysis_exchange
-from src.utils.logger import logger, get_mode_logger
+from src.utils.logger import logger, get_mode_logger, set_engine_api_logging
 from src.utils.fx_rate import get_usd_krw_rate
 from src.engine.position_store import PositionStore
 from src.engine.run_state_store import RunStateStore
@@ -250,6 +250,7 @@ class TradingEngine:
                         "price": r.get("현재가") or r.get("price") or r.get("current_price"),
                         "score": r.get("최종점수") or r.get("score") or r.get("final_score"),
                         "prob": r.get("상승확률") or r.get("prob") or r.get("up_prob") or r.get("prob_up"),
+                        "market_cap": r.get("시가총액") or r.get("market_cap") or r.get("marketCap") or r.get("mktcap"),
                     })
 
                 # UI/미리보기에서 분석 정보를 표시할 수 있도록 meta를 함께 반환
@@ -631,6 +632,7 @@ class TradingEngine:
         self.is_running = True
         self.last_run_at = datetime.now()
         self.last_error = None
+        set_engine_api_logging(mode, True)
         try:
             # (B) 자동매매는 토큰 확보 후 진행 (토큰 발급 제한(EGW00133) 대응)
             if not self._wait_for_token(mode=mode, timeout_sec=70, poll_sec=10):
@@ -730,7 +732,7 @@ class TradingEngine:
                 return
 
             # 2. 잔고 조회
-            balance_info = kis_order.get_balance(mode=mode)
+            balance_info = kis_order.get_balance(mode=mode, caller="ENGINE")
             if not balance_info:
                 log.error("[Engine] 잔고 조회 실패로 중단")
                 self.is_running = False
@@ -776,102 +778,104 @@ class TradingEngine:
                 if sym not in my_stocks:
                     store.upsert(symbol=sym, qty=0)
 
-            # 보유기간 보정: 가능하면 v1_007(주문체결내역)로 "최초 매수 체결일"을 동기화한다.
-            # (과도한 호출 방지: 1일 1회, PositionStore meta에 기록)
+            # 보유기간 보정: v1_007(주문체결내역) 동기화는 실전만 수행
+            # - mock에서는 ExecutionHistoryStore로 보유기간을 계산하므로 불필요 호출을 생략한다.
+            # - (과도한 호출 방지: 1일 1회, PositionStore meta에 기록)
             try:
-                today = datetime.now().strftime("%Y%m%d")
-                # api_sync_day가 오늘이어도, open_date가 detect(임시값)로 남아있으면 다시 동기화한다.
-                needs_sync = False
-                if held_symbols and (store.get_api_sync_day() != today):
-                    needs_sync = True
-                if held_symbols and (not needs_sync):
-                    for sym in held_symbols:
-                        try:
-                            if (store.get_open_date_source(sym) or "detect") != "api":
-                                needs_sync = True
-                                break
-                        except Exception:
-                            continue
+                if mode != "mock":
+                    today = datetime.now().strftime("%Y%m%d")
+                    # api_sync_day가 오늘이어도, open_date가 detect(임시값)로 남아있으면 다시 동기화한다.
+                    needs_sync = False
+                    if held_symbols and (store.get_api_sync_day() != today):
+                        needs_sync = True
+                    if held_symbols and (not needs_sync):
+                        for sym in held_symbols:
+                            try:
+                                if (store.get_open_date_source(sym) or "detect") != "api":
+                                    needs_sync = True
+                                    break
+                            except Exception:
+                                continue
 
-                if held_symbols and needs_sync:
-                    end = today
-                    lookback_days = 30 if mode == "mock" else 365
-                    start = (datetime.now() - timedelta(days=lookback_days)).strftime("%Y%m%d")
-                    hist = kis_order.get_order_history(start_date=start, end_date=end, mode=mode) or {}
-                    rows = hist.get("output") or hist.get("output1") or []
-                    rows = rows if isinstance(rows, list) else [rows]
+                    if held_symbols and needs_sync:
+                        end = today
+                        lookback_days = 365
+                        start = (datetime.now() - timedelta(days=lookback_days)).strftime("%Y%m%d")
+                        hist = kis_order.get_order_history(start_date=start, end_date=end, mode=mode, caller="ENGINE") or {}
+                        rows = hist.get("output") or hist.get("output1") or []
+                        rows = rows if isinstance(rows, list) else [rows]
 
-                    def _as_yyyymmdd(v: str | None) -> str | None:
-                        if not v:
-                            return None
-                        vv = str(v).strip().replace("-", "").replace(".", "")
-                        return vv if len(vv) == 8 and vv.isdigit() else None
+                        def _as_yyyymmdd(v: str | None) -> str | None:
+                            if not v:
+                                return None
+                            vv = str(v).strip().replace("-", "").replace(".", "")
+                            return vv if len(vv) == 8 and vv.isdigit() else None
 
-                    def _is_buy(row: dict) -> bool:
-                        v = str(
-                            row.get("sll_buy_dvsn")
-                            or row.get("sll_buy_dvsn_cd")
-                            or row.get("sll_buy_dvsn_name")
-                            or row.get("SLL_BUY_DVSN")
-                            or ""
-                        ).strip().lower()
-                        if ("buy" in v) or ("매수" in v):
-                            return True
-                        if v in ("02", "2", "buy"):
-                            return True
-                        return False
+                        def _is_buy(row: dict) -> bool:
+                            v = str(
+                                row.get("sll_buy_dvsn")
+                                or row.get("sll_buy_dvsn_cd")
+                                or row.get("sll_buy_dvsn_name")
+                                or row.get("SLL_BUY_DVSN")
+                                or ""
+                            ).strip().lower()
+                            if ("buy" in v) or ("매수" in v):
+                                return True
+                            if v in ("02", "2", "buy"):
+                                return True
+                            return False
 
-                    def _filled_qty(row: dict) -> float:
-                        for k in (
-                            "ft_ccld_qty",
-                            "ccld_qty",
-                            "CCLD_QTY",
-                            "ccld_qty1",
-                            "ccld_qty2",
-                            "tot_ccld_qty",
-                            "tot_ccld_qty1",
-                            "ft_ord_qty",
-                        ):
-                            if k in row and row.get(k) is not None:
-                                try:
-                                    return float(str(row.get(k)).replace(",", ""))
-                                except Exception:
-                                    pass
-                        return 0.0
+                        def _filled_qty(row: dict) -> float:
+                            for k in (
+                                "ft_ccld_qty",
+                                "ccld_qty",
+                                "CCLD_QTY",
+                                "ccld_qty1",
+                                "ccld_qty2",
+                                "tot_ccld_qty",
+                                "tot_ccld_qty1",
+                                "ft_ord_qty",
+                            ):
+                                if k in row and row.get(k) is not None:
+                                    try:
+                                        return float(str(row.get(k)).replace(",", ""))
+                                    except Exception:
+                                        pass
+                            return 0.0
 
-                    last_buy_date: dict[str, str] = {}
-                    held_set = set(held_symbols)
-                    for r in rows:
-                        if not isinstance(r, dict):
-                            continue
-                        sym = (r.get("pdno") or r.get("PDNO") or r.get("ovrs_pdno") or "").strip().upper()
-                        if not sym or sym not in held_set:
-                            continue
-                        if _filled_qty(r) <= 0:
-                            continue
-                        if not _is_buy(r):
-                            continue
-                        d = _as_yyyymmdd(
-                            r.get("trad_day")
-                            or r.get("TRAD_DAY")
-                            or r.get("ord_dt")
-                            or r.get("ORD_DT")
-                            or r.get("ccld_dt")
-                            or r.get("CCLD_DT")
-                        )
-                        if not d:
-                            continue
-                        cur = last_buy_date.get(sym)
-                        if (cur is None) or (d > cur):
-                            last_buy_date[sym] = d
+                        last_buy_date: dict[str, str] = {}
+                        held_set = set(held_symbols)
+                        for r in rows:
+                            if not isinstance(r, dict):
+                                continue
+                            sym = (r.get("pdno") or r.get("PDNO") or r.get("ovrs_pdno") or "").strip().upper()
+                            if not sym or sym not in held_set:
+                                continue
+                            if _filled_qty(r) <= 0:
+                                continue
+                            if not _is_buy(r):
+                                continue
+                            d = _as_yyyymmdd(
+                                r.get("trad_day")
+                                or r.get("TRAD_DAY")
+                                or r.get("ord_dt")
+                                or r.get("ORD_DT")
+                                or r.get("ccld_dt")
+                                or r.get("CCLD_DT")
+                            )
+                            if not d:
+                                continue
+                            cur = last_buy_date.get(sym)
+                            if (cur is None) or (d > cur):
+                                last_buy_date[sym] = d
 
-                    updated_any = False
-                    for sym, d in last_buy_date.items():
-                        store.set_open_date(symbol=sym, open_date=d, source="api")
-                        updated_any = True
-                    # 동기화가 실제로 성공(업데이트 발생)했을 때만 api_sync_day 갱신
-                    if updated_any:
-                        store.set_api_sync_day(today)
+                        updated_any = False
+                        for sym, d in last_buy_date.items():
+                            store.set_open_date(symbol=sym, open_date=d, source="api")
+                            updated_any = True
+                        # 동기화가 실제로 성공(업데이트 발생)했을 때만 api_sync_day 갱신
+                        if updated_any:
+                            store.set_api_sync_day(today)
             except Exception:
                 pass
 
@@ -908,7 +912,7 @@ class TradingEngine:
                     return []
                 if ex2 in _unfilled_cache:
                     return _unfilled_cache[ex2]
-                rows = kis_order.get_unfilled_orders(exchange=ex2, mode=mode) or []
+                rows = kis_order.get_unfilled_orders(exchange=ex2, mode=mode, caller="ENGINE") or []
                 rows = rows if isinstance(rows, list) else [rows]
                 _unfilled_cache[ex2] = rows
                 return rows
@@ -962,6 +966,7 @@ class TradingEngine:
                         price=0,
                         action="cancel",
                         mode=mode,
+                        caller="ENGINE",
                     )
                     _trace("unfilled.cancel.done", exchange=ex2, symbol=sym2, order_no=odno, ok=bool(cncl))
                     if cncl:
@@ -992,6 +997,7 @@ class TradingEngine:
                             sll_buy_dvsn="01",
                             ccld_nccs_dvsn="00",
                             mode=mode,
+                            caller="ENGINE",
                         ) or {}
                         rows = hist.get("output") or []
                         rows = rows if isinstance(rows, list) else [rows]
@@ -1033,17 +1039,17 @@ class TradingEngine:
                 - 실전/모의 공통: price=0, order_type='00'
                 """
                 # 1) 시장가 시도(가이드: OVRS_ORD_UNPR=0)
-                out = kis_order.order(symbol, qty, 0, 'sell', exchange=exchange, order_type='00', mode=mode)
+                out = kis_order.order(symbol, qty, 0, 'sell', exchange=exchange, order_type='00', mode=mode, caller="ENGINE")
                 if out:
                     return out, 0.0, "market_0"
 
                 # 2) 폴백: 현재가 기반 지정가(체결 우선: -슬리피지)
-                px = kis_quote.get_current_price(exchange, symbol, mode=mode) or {}
+                px = kis_quote.get_current_price(exchange, symbol, mode=mode, caller="ENGINE") or {}
                 sell_price = float(px.get("last", 0) or 0)
                 if sell_price <= 0:
                     return None, 0.0, "price_unavailable"
                 sell_price = sell_price * (1.0 - (slippage_pct / 100.0))
-                out = kis_order.order(symbol, qty, sell_price, 'sell', exchange=exchange, order_type='00', mode=mode)
+                out = kis_order.order(symbol, qty, sell_price, 'sell', exchange=exchange, order_type='00', mode=mode, caller="ENGINE")
                 return out, float(sell_price), "limit_fallback"
 
             # 4. 매도 실행 (전략 매도)
@@ -1092,6 +1098,9 @@ class TradingEngine:
                             "qty": qty,
                             "price": sell_price,
                             "reason": "take_profit",
+                            "profit_rate": profit_rate,
+                            "take_profit_pct": take_profit_pct,
+                            "stop_loss_pct": stop_loss_pct,
                             "method": method,
                             "order_no": (out or {}).get("ODNO") or (out or {}).get("odno"),
                             "ok": bool(out),
@@ -1125,6 +1134,9 @@ class TradingEngine:
                             "qty": qty,
                             "price": sell_price,
                             "reason": "stop_loss",
+                            "profit_rate": profit_rate,
+                            "take_profit_pct": take_profit_pct,
+                            "stop_loss_pct": stop_loss_pct,
                             "method": method,
                             "order_no": (out or {}).get("ODNO") or (out or {}).get("odno"),
                             "ok": bool(out),
@@ -1139,9 +1151,16 @@ class TradingEngine:
                                 pass
                     continue
 
-                # 보유기간 초과 강제매도 (로컬 추적 기반)
+                # 보유기간 초과 강제매도
                 if max_hold_days > 0:
-                    open_date = store.get_open_date(symbol)
+                    open_date = None
+                    if mode == "mock":
+                        try:
+                            open_date = ExecutionHistoryStore(mode=mode).get_last_buy_date(symbol)
+                        except Exception:
+                            open_date = None
+                    if not open_date:
+                        open_date = store.get_open_date(symbol)
                     if open_date and len(open_date) == 8:
                         try:
                             od = datetime.strptime(open_date, "%Y%m%d").date()
@@ -1163,6 +1182,8 @@ class TradingEngine:
                                         "qty": qty,
                                         "price": sell_price,
                                         "reason": "max_hold_days",
+                                        "holding_days": days_held,
+                                        "max_hold_days": max_hold_days,
                                         "method": method,
                                         "order_no": (out or {}).get("ODNO") or (out or {}).get("odno"),
                                         "ok": bool(out),
@@ -1376,7 +1397,7 @@ class TradingEngine:
                         
                     # 현재가 조회 (거래소 정보 포함)
                     _set_step("buy.quote.current", symbol=symbol, exchange=exchange)
-                    price_info = kis_quote.get_current_price(exchange, symbol, mode=mode)
+                    price_info = kis_quote.get_current_price(exchange, symbol, mode=mode, caller="ENGINE")
                     if not price_info:
                         log.warning(f"[Engine] {symbol} 시세 조회 실패")
                         history["skips"].append({"side": "buy", "symbol": symbol, "reason": "quote_failed", "detail": {"exchange": exchange}})
@@ -1432,7 +1453,7 @@ class TradingEngine:
                         _trace("buy.buyable.skip_mock", symbol=symbol, exchange=exchange, price=float(planned_buy_price))
                     else:
                         _set_step("buy.buyable", symbol=symbol, exchange=exchange, price=float(planned_buy_price))
-                        ps = kis_order.get_buyable_amount(exchange=exchange, symbol=symbol, price=planned_buy_price, mode=mode)
+                        ps = kis_order.get_buyable_amount(exchange=exchange, symbol=symbol, price=planned_buy_price, mode=mode, caller="ENGINE")
                         if ps is None:
                             # 정책: v1_014가 최종 실패하면 해당 종목 매수는 스킵 (부분체결/로그-잔고 불일치 방지)
                             log.warning(f"[Engine] 매수가능금액조회(v1_014) 최종 실패(EGW00201 등). {symbol} 매수 스킵")
@@ -1461,7 +1482,7 @@ class TradingEngine:
                         try:
                             if not odno:
                                 return 0
-                            rows = kis_order.get_unfilled_orders(exchange=exchange, mode=mode) or []
+                            rows = kis_order.get_unfilled_orders(exchange=exchange, mode=mode, caller="ENGINE") or []
                             rows = rows if isinstance(rows, list) else [rows]
                             for r in rows:
                                 if not isinstance(r, dict):
@@ -1499,7 +1520,7 @@ class TradingEngine:
 
                     def _buy_with_ask_ladder() -> tuple[bool, str]:
                         # 1) 호가 조회
-                        ob = kis_quote.get_asking_price(exchange, symbol, mode=mode)
+                        ob = kis_quote.get_asking_price(exchange, symbol, mode=mode, caller="ENGINE")
                         if not ob:
                             log.warning(f"[Engine] {symbol} 호가 조회 실패 → 슬리피지 지정가로 폴백")
                             _trace("buy.ladder.hoga_failed", symbol=symbol, exchange=exchange)
@@ -1553,7 +1574,7 @@ class TradingEngine:
 
                             # 가격이 바뀌면 매수가능수량도 바뀔 수 있어 재조회
                             _set_step("buy.buyable_ladder", symbol=symbol, exchange=exchange, price=float(ask_price))
-                            ps2 = kis_order.get_buyable_amount(exchange=exchange, symbol=symbol, price=ask_price, mode=mode)
+                            ps2 = kis_order.get_buyable_amount(exchange=exchange, symbol=symbol, price=ask_price, mode=mode, caller="ENGINE")
                             max_ps_qty2 = None
                             try:
                                 if ps2 and ps2.get("ovrs_max_ord_psbl_qty"):
@@ -1588,7 +1609,7 @@ class TradingEngine:
                                 qty=int(remaining),
                                 price=float(ask_price),
                             )
-                            out = kis_order.order(symbol, remaining, ask_price, 'buy', exchange=exchange, order_type='00', mode=mode)
+                            out = kis_order.order(symbol, remaining, ask_price, 'buy', exchange=exchange, order_type='00', mode=mode, caller="ENGINE")
                             odno = (out or {}).get("ODNO") or (out or {}).get("odno")
                             # ladder 주문 시도도 이력에 기록(상세 UI용)
                             try:
@@ -1662,6 +1683,7 @@ class TradingEngine:
                                 price=0,
                                 action="cancel",
                                 mode=mode,
+                                caller="ENGINE",
                             )
                             _trace("buy.ladder.cancel", symbol=symbol, exchange=exchange, order_no=str(odno), unfilled_qty=int(unfilled_qty), ok=bool(cncl))
                             if not cncl:
@@ -1712,7 +1734,7 @@ class TradingEngine:
                                 # 이 경우에만(=ladder 주문을 넣기 전) 기존 방식으로 1회 폴백한다.
                                 buy_price = current_price * (1.0 + (slippage_pct / 100.0))
                                 log.info(f"[Engine] ladder 불가({reason}) → 슬리피지 지정가 1회 폴백: {symbol} {qty}주 (@{buy_price})")
-                                out = kis_order.order(symbol, qty, buy_price, 'buy', exchange=exchange, order_type='00', mode=mode)
+                                out = kis_order.order(symbol, qty, buy_price, 'buy', exchange=exchange, order_type='00', mode=mode, caller="ENGINE")
                                 history["buy_attempts"].append({
                                     "symbol": symbol,
                                     "exchange": exchange,
@@ -1735,7 +1757,7 @@ class TradingEngine:
                                 pass
                             buy_price = planned_buy_price
                             log.info(f"[Engine] 매수 주문 실행: {symbol}({exchange}) {qty}주 (@{buy_price})")
-                            out = kis_order.order(symbol, qty, buy_price, 'buy', exchange=exchange, order_type='00', mode=mode)
+                            out = kis_order.order(symbol, qty, buy_price, 'buy', exchange=exchange, order_type='00', mode=mode, caller="ENGINE")
                             history["buy_attempts"].append({
                                 "symbol": symbol,
                                 "exchange": exchange,
@@ -1783,6 +1805,7 @@ class TradingEngine:
             except Exception:
                 # 이력 저장 실패는 매매 실패로 간주하지 않는다.
                 pass
+            set_engine_api_logging(mode, False)
             self.is_running = False
 
     def run(self):
@@ -1807,6 +1830,17 @@ class TradingEngine:
         """
         if mode is None:
             mode = config_manager.get('common.mode', 'mock')
+        return self._run_core(mode=mode, analysis_data=analysis_data, ignore_auto_enabled=True)
+
+    def run_once_sell_only(self, mode: str | None = None):
+        """
+        매도 전용 1회 실행:
+        - 분석서버 요청 없이 매수 로직을 제외하고 매도 로직만 수행
+        - auto_trading_enabled가 OFF여도 1회 실행은 허용
+        """
+        if mode is None:
+            mode = config_manager.get('common.mode', 'mock')
+        analysis_data = {"buy": [], "sell": []}
         return self._run_core(mode=mode, analysis_data=analysis_data, ignore_auto_enabled=True)
 
     def get_next_scheduled_run_at(self, mode: str | None = None):
@@ -1880,7 +1914,7 @@ class TradingEngine:
                 threshold_pct = -7.0
             slippage_pct = float(strategy.get("slippage_pct", 0.5) or 0.5)
 
-            balance_info = kis_order.get_balance(mode=mode)
+            balance_info = kis_order.get_balance(mode=mode, caller="ENGINE")
             if not balance_info:
                 return
 
@@ -1923,16 +1957,16 @@ class TradingEngine:
                 exchange = stock.get("ovrs_excg_cd") or "NASD"
 
                 # 시장가(가격=0) 우선 시도, 실패 시 지정가 폴백
-                out = kis_order.order(symbol, qty, 0, 'sell', exchange=exchange, order_type='00', mode=mode)
+                out = kis_order.order(symbol, qty, 0, 'sell', exchange=exchange, order_type='00', mode=mode, caller="ENGINE")
                 sell_price = 0.0
                 method = "market_0"
                 if not out:
-                    px = kis_quote.get_current_price(exchange, symbol, mode=mode) or {}
+                    px = kis_quote.get_current_price(exchange, symbol, mode=mode, caller="ENGINE") or {}
                     sell_price = float(px.get("last", 0) or 0)
                     if sell_price <= 0:
                         continue
                     sell_price = sell_price * (1.0 - (slippage_pct / 100.0))
-                    out = kis_order.order(symbol, qty, sell_price, 'sell', exchange=exchange, order_type='00', mode=mode)
+                    out = kis_order.order(symbol, qty, sell_price, 'sell', exchange=exchange, order_type='00', mode=mode, caller="ENGINE")
                     method = "limit_fallback"
 
                 log.info(f"[StopWatch] 장중 감시 매도: {symbol} qty={qty}, rate={profit_rate}%, threshold={threshold_pct}%, price={sell_price}, method={method}")

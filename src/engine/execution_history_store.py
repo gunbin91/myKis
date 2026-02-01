@@ -90,3 +90,53 @@ class ExecutionHistoryStore:
                 continue
         return None
 
+    def get_last_buy_date(self, symbol: str, days: int | None = None) -> str | None:
+        """
+        자동매매 이력에서 종목별 '가장 최근 매수 성공일(YYYYMMDD)'을 반환.
+        - rows는 최신이 위라서 첫 매칭을 반환한다.
+        """
+        sym = (symbol or "").strip().upper()
+        if not sym:
+            return None
+        rows = self._read_all()
+        if not rows:
+            return None
+        if days is not None:
+            try:
+                cutoff = datetime.now() - timedelta(days=int(days))
+            except Exception:
+                cutoff = None
+        else:
+            cutoff = None
+
+        def _to_yyyymmdd(ts: str | None) -> str | None:
+            if not ts:
+                return None
+            try:
+                dt = datetime.fromisoformat(str(ts))
+                return dt.strftime("%Y%m%d")
+            except Exception:
+                return None
+
+        for r in rows:
+            try:
+                ts = r.get("started_at") or r.get("finished_at")
+                if cutoff and ts:
+                    try:
+                        dt = datetime.fromisoformat(str(ts))
+                        if dt < cutoff:
+                            continue
+                    except Exception:
+                        pass
+                for att in (r.get("buy_attempts") or []):
+                    if not isinstance(att, dict):
+                        continue
+                    if not att.get("ok"):
+                        continue
+                    s = (att.get("symbol") or "").strip().upper()
+                    if s == sym:
+                        return _to_yyyymmdd(ts)
+            except Exception:
+                continue
+        return None
+
