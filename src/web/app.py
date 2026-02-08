@@ -1,4 +1,5 @@
 from flask import Flask, render_template, jsonify, request, redirect
+import json
 import threading
 import os
 import glob
@@ -666,6 +667,41 @@ def get_status():
     # 보유기간(일) 계산: v1_007 주문체결내역 동기화는 실전만 수행
     # - mock은 ExecutionHistoryStore를 사용하므로 v1_007 호출을 생략
     # - 과도한 API 호출 방지: 1일 1회만 동기화(파일 기반 PositionStore meta)
+    last_buy_date_map: dict[str, str] = {}
+    def _pick_latest_date(*dates: str | None) -> str | None:
+        candidates = []
+        for d in dates:
+            if not d:
+                continue
+            s = str(d).strip()
+            if len(s) == 8 and s.isdigit():
+                candidates.append(s)
+        return max(candidates) if candidates else None
+    cache_path = PROJECT_ROOT / "data" / f"last_buy_cache_{mode}.json"
+    def _read_last_buy_cache() -> dict[str, str]:
+        try:
+            if not cache_path.exists():
+                return {}
+            with open(cache_path, "r", encoding="utf-8") as f:
+                data = json.load(f) or {}
+            dates = data.get("dates") if isinstance(data, dict) else None
+            return dates if isinstance(dates, dict) else {}
+        except Exception:
+            return {}
+    def _write_last_buy_cache(dates: dict[str, str]) -> None:
+        try:
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            payload = {
+                "updated_at": datetime.now().isoformat(timespec="seconds"),
+                "dates": dates,
+            }
+            tmp = cache_path.with_suffix(cache_path.suffix + ".tmp")
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False, indent=2)
+            tmp.replace(cache_path)
+        except Exception:
+            pass
+    cache_dates = _read_last_buy_cache()
     try:
         store = PositionStore(mode=mode)
         history_store = ExecutionHistoryStore(mode=mode)
@@ -682,10 +718,12 @@ def get_status():
             except Exception:
                 continue
 
-        # 잔고에 없는 종목은 store에서도 정리
+        # 잔고에 없는 종목은 store에서도 정리(일시 누락 유예)
         for sym in store.all_symbols():
             if sym not in held_symbols:
-                store.upsert(symbol=sym, qty=0)
+                miss = store.mark_missing(sym)
+                if miss >= 2:
+                    store.upsert(symbol=sym, qty=0)
 
         if mode != "mock":
             # api_sync_day가 오늘이어도, open_date가 detect(임시값)로 남아있으면 다시 동기화한다.
@@ -701,15 +739,35 @@ def get_status():
                     except Exception:
                         continue
 
+            retry_at = store.get_api_retry_at()
+            retry_due = False
+            if retry_at:
+                try:
+                    retry_due = datetime.now() >= datetime.fromisoformat(retry_at)
+                except Exception:
+                    retry_due = True
+            if (not needs_sync) and held_symbols and retry_due:
+                needs_sync = True
+
             if held_symbols and needs_sync:
                 # 주문체결내역 조회는 호출 제한/조회제약이 있을 수 있어, 최근 N일만 조회한다.
                 # - 실전: 필요 시 늘릴 수 있음
-                end = today
-                lookback_days = 365
-                start = (datetime.now() - timedelta(days=lookback_days)).strftime("%Y%m%d")
-                hist = kis_order.get_order_history(start_date=start, end_date=end, mode=mode) or {}
-                rows = hist.get("output") or hist.get("output1") or []
-                rows = rows if isinstance(rows, list) else [rows]
+                hist = None
+                rows = []
+                for lookback_days in (60, 30, 14):
+                    end = today
+                    start = (datetime.now() - timedelta(days=lookback_days)).strftime("%Y%m%d")
+                    hist = kis_order.get_order_history(
+                        start_date=start,
+                        end_date=end,
+                        sll_buy_dvsn="02",
+                        ccld_nccs_dvsn="01",
+                        mode=mode,
+                    )
+                    if hist is not None:
+                        rows = hist.get("output") or hist.get("output1") or []
+                        rows = rows if isinstance(rows, list) else [rows]
+                        break
 
                 def _as_yyyymmdd(v: str | None) -> str | None:
                     if not v:
@@ -718,17 +776,23 @@ def get_status():
                     return vv if len(vv) == 8 and vv.isdigit() else None
 
                 def _is_buy(row: dict) -> bool:
-                    v = str(
-                        row.get("sll_buy_dvsn")
-                        or row.get("sll_buy_dvsn_cd")
-                        or row.get("sll_buy_dvsn_name")
+                    # 가이드: sll_buy_dvsn_cd = 02 (매수)
+                    cd = str(
+                        row.get("sll_buy_dvsn_cd")
+                        or row.get("SLL_BUY_DVSN_CD")
+                        or row.get("sll_buy_dvsn")
                         or row.get("SLL_BUY_DVSN")
                         or ""
-                    ).strip().lower()
-                    # 휴리스틱: 'buy/매수' 포함 또는 코드값이 2 계열이면 매수로 간주
-                    if ("buy" in v) or ("매수" in v):
+                    ).strip()
+                    if cd in ("02", "2"):
                         return True
-                    if v in ("02", "2", "buy"):
+                    v = str(
+                        row.get("sll_buy_dvsn_name")
+                        or row.get("sll_buy_dvsn_cd_name")
+                        or row.get("sll_buy_dvsn_name")
+                        or ""
+                    ).strip().lower()
+                    if ("buy" in v) or ("매수" in v):
                         return True
                     return False
 
@@ -763,13 +827,14 @@ def get_status():
                     if not _is_buy(r):
                         continue
 
+                    # 가이드: ord_dt(주문일자)를 우선 사용
                     d = _as_yyyymmdd(
-                        r.get("trad_day")
-                        or r.get("TRAD_DAY")
+                        r.get("ccld_dt")
+                        or r.get("CCLD_DT")
                         or r.get("ord_dt")
                         or r.get("ORD_DT")
-                        or r.get("ccld_dt")
-                        or r.get("CCLD_DT")
+                        or r.get("trad_day")
+                        or r.get("TRAD_DAY")
                     )
                     if not d:
                         continue
@@ -777,13 +842,65 @@ def get_status():
                     if (cur is None) or (d > cur):
                         last_buy_date[sym] = d
 
-                updated_any = False
-                for sym, d in last_buy_date.items():
-                    store.set_open_date(symbol=sym, open_date=d, source="api")
-                    updated_any = True
-                # 동기화가 실제로 성공(업데이트 발생)했을 때만 api_sync_day 갱신
-                if updated_any:
-                    store.set_api_sync_day(today)
+                if hist is not None:
+                    updated_any = False
+                    for sym, d in last_buy_date.items():
+                        store.set_open_date(symbol=sym, open_date=d, source="api")
+                        updated_any = True
+                    last_buy_date_map = last_buy_date
+                    if last_buy_date:
+                        cache_dates.update(last_buy_date)
+                        _write_last_buy_cache(cache_dates)
+                    # 동기화가 실제로 성공(업데이트 발생)했을 때만 api_sync_day 갱신
+                    if updated_any:
+                        store.set_api_sync_day(today)
+                    store.clear_api_retry()
+                    # 일부 종목 누락 시 개별 조회로 보강 (페이지 제한/정렬 문제 대응)
+                    missing = set(held_symbols) - set(last_buy_date.keys())
+                    if missing:
+                        for sym in sorted(missing):
+                            fetched = None
+                            for lookback_days in (60, 30, 14):
+                                end = today
+                                start = (datetime.now() - timedelta(days=lookback_days)).strftime("%Y%m%d")
+                                h2 = kis_order.get_order_history(
+                                    start_date=start,
+                                    end_date=end,
+                                    pdno=sym,
+                                    sll_buy_dvsn="02",
+                                    ccld_nccs_dvsn="01",
+                                    mode=mode,
+                                )
+                                if h2 is None:
+                                    continue
+                                r2 = h2.get("output") or h2.get("output1") or []
+                                r2 = r2 if isinstance(r2, list) else [r2]
+                                for rr in r2:
+                                    if not isinstance(rr, dict):
+                                        continue
+                                    d2 = _as_yyyymmdd(
+                                        rr.get("ccld_dt")
+                                        or rr.get("CCLD_DT")
+                                        or rr.get("ord_dt")
+                                        or rr.get("ORD_DT")
+                                        or rr.get("trad_day")
+                                        or rr.get("TRAD_DAY")
+                                    )
+                                    if d2 and ((fetched is None) or (d2 > fetched)):
+                                        fetched = d2
+                                if fetched:
+                                    break
+                            if fetched:
+                                store.set_open_date(symbol=sym, open_date=fetched, source="api")
+                                last_buy_date_map[sym] = fetched
+                                cache_dates[sym] = fetched
+                        if missing:
+                            _write_last_buy_cache(cache_dates)
+                else:
+                    store.set_api_last_error("v1_007_failed")
+                    store.set_api_retry_at((datetime.now() + timedelta(minutes=20)).isoformat(timespec="seconds"))
+        if (mode != "mock") and (not last_buy_date_map) and cache_dates:
+            last_buy_date_map = cache_dates
 
         # stocks에 보유기간 필드 주입
         for s in stocks:
@@ -798,7 +915,9 @@ def get_status():
                     except Exception:
                         od = None
                 else:
-                    od = store.get_open_date(sym)
+                    od = last_buy_date_map.get(sym)
+                    if not od:
+                        od = None
                 s["open_date"] = od
                 if od and len(od) == 8:
                     days = (datetime.now().date() - datetime.strptime(od, "%Y%m%d").date()).days
@@ -880,7 +999,7 @@ def get_status():
 
         # v1_008(output3): 자산 요약 (원화 기준이 대부분)
         "total_asset_krw": out3.get("tot_asst_amt", "0"),          # 총자산금액
-        "eval_amount_krw": out3.get("evlu_amt_smtl") or out3.get("evlu_amt_smtl_amt", "0"),  # 평가금액합계(원화)
+        "eval_amount_krw": out3.get("evlu_amt_smtl_amt") or out3.get("evlu_amt_smtl", "0"),  # 평가금액합계(원화)
         "deposit_krw": out3.get("tot_dncl_amt") or out3.get("dncl_amt", "0"),  # (총)예수금액
         "withdrawable_krw": out3.get("wdrw_psbl_tot_amt", "0"),    # 인출가능총금액
         "fx_use_psbl_amt": out3.get("frcr_use_psbl_amt", "0"),     # 외화사용가능금액(통화는 계좌/시장 상황에 따름)
@@ -890,13 +1009,13 @@ def get_status():
         # USD/KRW 환율(원/달러) - 자동(008) 우선, 설정값은 fallback
         "usd_krw_rate": str(usd_krw_rate_effective) if usd_krw_rate_effective > 0 else "0",
         "usd_krw_rate_source": usd_krw_rate_src or "unavailable",
-        # 평가손익/수익률은 가이드상 원화환산 합계가 존재하므로 우선 사용
-        "total_profit_krw": out3.get("evlu_pfls_amt_smtl") or out3.get("tot_evlu_pfls_amt", "0"),  # 평가손익금액합계(우선) / 총평가손익금액(대체)
+        # 평가손익/수익률은 원화 총평가손익(tot_evlu_pfls_amt) 우선 사용
+        "total_profit_krw": out3.get("tot_evlu_pfls_amt") or out3.get("evlu_pfls_amt_smtl", "0"),  # 총평가손익금액(우선) / 평가손익금액합계(대체)
         "profit_rate_krw": str(profit_rate_krw),                    # 평가수익율1(우선) / 계산값 fallback
 
         # 하위 호환(기존 UI/코드가 참조하던 키). 이제 '총자산/손익/수익률'은 v1_008 기준으로 맞춘다.
         "total_asset": out3.get("tot_asst_amt", "0"),
-        "total_profit": out3.get("evlu_pfls_amt_smtl") or out3.get("tot_evlu_pfls_amt", "0"),
+        "total_profit": out3.get("tot_evlu_pfls_amt") or out3.get("evlu_pfls_amt_smtl", "0"),
         "profit_rate": str(profit_rate_krw),
     }
     
@@ -1084,6 +1203,14 @@ def api_trading_diary_period_profit():
             # 일별 집계(동일 날짜 여러 종목 합산)
             daily = {}
             total_trades = 0
+
+            def _to_float(v):
+                try:
+                    return float(str(v or 0).replace(",", ""))
+                except Exception:
+                    return 0.0
+
+            detail_rows = []
             for r in rows:
                 d = r.get("trad_day")
                 if not d:
@@ -1099,11 +1226,24 @@ def api_trading_diary_period_profit():
                     ("frcr_sll_amt_smtl1", "sell_amt"),
                     ("ovrs_rlzt_pfls_amt", "profit"),
                 ]:
-                    try:
-                        daily[key][k_dst] += float(str(r.get(k_src) or 0).replace(",", ""))
-                    except Exception:
-                        pass
+                    daily[key][k_dst] += _to_float(r.get(k_src))
                 total_trades += 1
+
+                detail_rows.append({
+                    "date": key,
+                    "symbol": r.get("ovrs_pdno") or "",
+                    "name": r.get("ovrs_item_name") or "",
+                    "exchange": r.get("ovrs_excg_cd") or "",
+                    "side": "매도",
+                    "qty": _to_float(r.get("slcl_qty")),
+                    "buy_amt": _to_float(r.get("frcr_pchs_amt1")),
+                    "sell_amt": _to_float(r.get("frcr_sll_amt_smtl1")),
+                    "profit": _to_float(r.get("ovrs_rlzt_pfls_amt")),
+                    "rate": _to_float(r.get("pftrt")),
+                    "fee": _to_float(r.get("stck_sll_tlex")),
+                    "avg_buy_price": _to_float(r.get("pchs_avg_pric")),
+                    "avg_sell_price": _to_float(r.get("avg_sll_unpr")),
+                })
 
             daily_rows = sorted(daily.values(), key=lambda x: x["date"])
             for dr in daily_rows:
@@ -1121,6 +1261,7 @@ def api_trading_diary_period_profit():
                 "source": "KIS v1_해외주식-032(실전)",
                 "note": "가이드 기준: HTS 해외 기간손익과 동일 로직(참고용)",
                 "rows": daily_rows,
+                "detail_rows": detail_rows,
                 "summary": {
                     "total_trades": total_trades,
                     "total_profit": total_profit,
@@ -1139,6 +1280,7 @@ def api_trading_diary_period_profit():
 
         daily = {}
         total_trades = 0
+        detail_rows = []
         for o in orders:
             d = o.get("ord_dt")
             if not d:
@@ -1164,6 +1306,19 @@ def api_trading_diary_period_profit():
 
             total_trades += 1
 
+            detail_rows.append({
+                "date": key,
+                "symbol": o.get("pdno") or o.get("ovrs_pdno") or o.get("symbol") or "",
+                "name": o.get("prdt_name") or o.get("ovrs_item_name") or o.get("pdnm") or "",
+                "exchange": o.get("ovrs_excg_cd") or o.get("excg_cd") or "",
+                "side": "매수" if side == "02" else ("매도" if side == "01" else ""),
+                "qty": qty,
+                "buy_amt": amt if side == "02" else 0.0,
+                "sell_amt": amt if side == "01" else 0.0,
+                "profit": 0.0,
+                "rate": 0.0,
+            })
+
         daily_rows = sorted(daily.values(), key=lambda x: x["date"])
         for dr in daily_rows:
             dr["rate"] = 0.0
@@ -1177,6 +1332,7 @@ def api_trading_diary_period_profit():
             "source": "KIS v1_007(모의 fallback)",
             "note": "모의는 기간손익 API 미지원이라 참고용 집계(손익/수익률은 0)입니다.",
             "rows": daily_rows,
+            "detail_rows": detail_rows,
             "summary": {
                 "total_trades": total_trades,
                 "total_profit": total_profit,

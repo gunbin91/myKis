@@ -33,7 +33,9 @@ class PositionStore:
                 loaded = json.load(f) or {}
             if isinstance(loaded, dict) and "positions" in loaded:
                 # meta는 옵션 (하위호환)
-                self.data = {"meta": loaded.get("meta") or {}, "positions": loaded.get("positions") or {}}
+                meta = loaded.get("meta") or {}
+                meta.setdefault("missing_counts", {})
+                self.data = {"meta": meta, "positions": loaded.get("positions") or {}}
         except Exception:
             # 손상 파일이면 초기화
             self.data = {"meta": {}, "positions": {}}
@@ -58,7 +60,8 @@ class PositionStore:
         if qty <= 0:
             if symbol in positions:
                 del positions[symbol]
-                self._save()
+            self.clear_missing(symbol)
+            self._save()
             return
 
         if symbol not in positions:
@@ -68,6 +71,7 @@ class PositionStore:
                 "qty": int(qty),
                 "exchange": exchange,
             }
+            self.clear_missing(symbol)
             self._save()
             return
 
@@ -83,6 +87,7 @@ class PositionStore:
         positions[symbol]["qty"] = int(qty)
         if exchange:
             positions[symbol]["exchange"] = exchange
+        self.clear_missing(symbol)
         self._save()
 
     def get_open_date(self, symbol: str) -> str | None:
@@ -104,12 +109,15 @@ class PositionStore:
         cur_source = str(pos.get("open_date_source") or "detect").strip().lower()
         new_source = str(source or "api").strip().lower()
 
-        # api가 제공하는 open_date는 detect(최초 감지일)보다 신뢰도가 높다.
-        # 따라서 현재가 detect라면(임시값), api 날짜가 과거라도 덮어써서 0일 문제를 해결한다.
+        # api가 제공하는 open_date는 신뢰도가 높지만,
+        # 이미 더 최신 날짜가 기록된 경우(전량 매도 후 재매수 등)는 과거로 되돌리지 않는다.
         if new_source == "api" and cur_source != "api":
-            pos["open_date"] = str(open_date)
-            pos["open_date_source"] = "api"
-            self._save()
+            new_date = str(open_date)
+            cur_date = str(pos.get("open_date") or "")
+            if (not cur_date) or (len(cur_date) != 8) or (new_date >= cur_date):
+                pos["open_date"] = new_date
+                pos["open_date_source"] = "api"
+                self._save()
             return
 
         # "가장 최근 매수일" 기준: 더 최신 날짜일 때만 갱신(과거로 되돌아가는 것 방지)
@@ -120,12 +128,69 @@ class PositionStore:
             pos["open_date_source"] = new_source
         self._save()
 
+    def _missing_counts(self) -> dict:
+        meta = self.data.setdefault("meta", {})
+        mc = meta.setdefault("missing_counts", {})
+        if not isinstance(mc, dict):
+            meta["missing_counts"] = {}
+            mc = meta["missing_counts"]
+        return mc
+
+    def mark_missing(self, symbol: str) -> int:
+        symbol = (symbol or "").strip().upper()
+        if not symbol:
+            return 0
+        mc = self._missing_counts()
+        mc[symbol] = int(mc.get(symbol, 0) or 0) + 1
+        self._save()
+        return int(mc[symbol] or 0)
+
+    def clear_missing(self, symbol: str) -> None:
+        symbol = (symbol or "").strip().upper()
+        if not symbol:
+            return
+        mc = self._missing_counts()
+        if symbol in mc:
+            del mc[symbol]
+            self._save()
+
+    def get_missing_count(self, symbol: str) -> int:
+        symbol = (symbol or "").strip().upper()
+        if not symbol:
+            return 0
+        mc = self._missing_counts()
+        return int(mc.get(symbol, 0) or 0)
+
     def get_api_sync_day(self) -> str | None:
         return (self.data.get("meta") or {}).get("api_sync_day")
 
     def set_api_sync_day(self, day: str) -> None:
         self.data.setdefault("meta", {})
         self.data["meta"]["api_sync_day"] = day
+        self._save()
+
+    def get_api_retry_at(self) -> str | None:
+        return (self.data.get("meta") or {}).get("api_retry_at")
+
+    def set_api_retry_at(self, dt_iso: str) -> None:
+        self.data.setdefault("meta", {})
+        self.data["meta"]["api_retry_at"] = dt_iso
+        self._save()
+
+    def clear_api_retry(self) -> None:
+        meta = self.data.setdefault("meta", {})
+        if "api_retry_at" in meta:
+            del meta["api_retry_at"]
+        if "api_last_error" in meta:
+            del meta["api_last_error"]
+        self._save()
+
+    def set_api_last_error(self, msg: str | None) -> None:
+        self.data.setdefault("meta", {})
+        if msg:
+            self.data["meta"]["api_last_error"] = msg
+        else:
+            self.data["meta"].pop("api_last_error", None)
         self._save()
 
     def get_exchange(self, symbol: str) -> str | None:

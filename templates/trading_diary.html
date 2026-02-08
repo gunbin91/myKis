@@ -60,7 +60,7 @@
     <strong>기간 조회</strong>
   </div>
   <div class="card-body">
-    <div class="row g-2 align-items-end">
+    <div class="row g-2 align-items-end mb-2">
       <div class="col-md-3">
         <label class="form-label">시작일</label>
         <input type="date" class="form-control" id="diary-from" />
@@ -80,45 +80,110 @@
           <option value="HASE">베트남(HASE)</option>
         </select>
       </div>
+    </div>
+    <div class="row g-2 align-items-end">
+      <div class="col-md-3">
+        <label class="form-label">손익 필터</label>
+        <select class="form-select" id="diary-profit-filter">
+          <option value="">전체</option>
+          <option value="profit">수익</option>
+          <option value="loss">손실</option>
+          <option value="zero">보합</option>
+        </select>
+      </div>
       <div class="col-md-3 d-flex gap-2">
         <button class="btn btn-primary w-100" id="btn-diary-search">
           <i class="fas fa-search me-1"></i>조회
         </button>
       </div>
+      <div class="col-md-6">
+        <div class="small text-muted mt-1">수익(+)은 빨강, 손실(-)은 파랑으로 표시합니다.</div>
+      </div>
     </div>
   </div>
 </div>
 
-<div class="card mb-3">
-  <div class="card-header d-flex justify-content-between align-items-center">
-    <strong>일별 손익 그래프</strong>
+<ul class="nav nav-tabs mb-3" id="diaryTabs" role="tablist">
+  <li class="nav-item" role="presentation">
+    <button class="nav-link active" id="diary-daily-tab" data-bs-toggle="tab" data-bs-target="#diary-daily" type="button" role="tab">
+      <i class="fas fa-calendar-day me-1"></i>일별 매매일지
+    </button>
+  </li>
+  <li class="nav-item" role="presentation">
+    <button class="nav-link" id="diary-chart-tab" data-bs-toggle="tab" data-bs-target="#diary-chart" type="button" role="tab">
+      <i class="fas fa-chart-column me-1"></i>일별 손익 그래프
+    </button>
+  </li>
+  <li class="nav-item" role="presentation">
+    <button class="nav-link" id="diary-cum-tab" data-bs-toggle="tab" data-bs-target="#diary-cum" type="button" role="tab">
+      <i class="fas fa-chart-line me-1"></i>누적 손익 그래프
+    </button>
+  </li>
+</ul>
+
+<div class="tab-content" id="diaryTabContent">
+  <div class="tab-pane fade show active" id="diary-daily" role="tabpanel">
+    <div class="card">
+      <div class="card-header">
+        <strong>일별 손익 내역</strong>
+      </div>
+      <div class="card-body p-0">
+        <div class="table-responsive">
+          <table class="table table-dark table-hover mb-0 align-middle">
+            <thead>
+              <tr>
+                <th>일자</th>
+                <th class="text-end">매도수량</th>
+                <th class="text-end">매입금액 <span class="badge bg-secondary" id="diary-th-buy-badge">USD</span></th>
+                <th class="text-end">매도금액 <span class="badge bg-secondary" id="diary-th-sell-badge">USD</span></th>
+                <th class="text-end">실현손익 <span class="badge bg-secondary" id="diary-th-profit-badge">USD</span></th>
+                <th class="text-end">수익률</th>
+                <th class="text-end">상세</th>
+              </tr>
+            </thead>
+            <tbody id="diary-tbody">
+              <tr><td colspan="7" class="text-center text-muted py-4">로딩 중...</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
   </div>
-  <div class="card-body">
-    <canvas id="diaryChart" height="110"></canvas>
+  <div class="tab-pane fade" id="diary-chart" role="tabpanel">
+    <div class="card mb-3">
+      <div class="card-header d-flex justify-content-between align-items-center">
+        <strong>일별 손익 그래프</strong>
+      </div>
+      <div class="card-body">
+        <canvas id="diaryChart" height="110"></canvas>
+      </div>
+    </div>
+  </div>
+  <div class="tab-pane fade" id="diary-cum" role="tabpanel">
+    <div class="card mb-3">
+      <div class="card-header d-flex justify-content-between align-items-center">
+        <strong>누적 손익 그래프</strong>
+      </div>
+      <div class="card-body">
+        <canvas id="diaryCumChart" height="110"></canvas>
+      </div>
+    </div>
   </div>
 </div>
 
-<div class="card">
-  <div class="card-header">
-    <strong>일별 손익 내역</strong>
-  </div>
-  <div class="card-body p-0">
-    <div class="table-responsive">
-      <table class="table table-dark table-hover mb-0 align-middle">
-        <thead>
-          <tr>
-            <th>일자</th>
-            <th class="text-end">매도수량</th>
-            <th class="text-end">매입금액 <span class="badge bg-secondary" id="diary-th-buy-badge">USD</span></th>
-            <th class="text-end">매도금액 <span class="badge bg-secondary" id="diary-th-sell-badge">USD</span></th>
-            <th class="text-end">실현손익 <span class="badge bg-secondary" id="diary-th-profit-badge">USD</span></th>
-            <th class="text-end">수익률</th>
-          </tr>
-        </thead>
-        <tbody id="diary-tbody">
-          <tr><td colspan="6" class="text-center text-muted py-4">로딩 중...</td></tr>
-        </tbody>
-      </table>
+<div class="modal fade" id="diaryDetailModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-xl modal-dialog-centered">
+    <div class="modal-content bg-dark border-secondary">
+      <div class="modal-header border-secondary">
+        <h5 class="modal-title" id="diaryDetailTitle">일별 매매 상세</h5>
+        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <div class="modal-body" id="diaryDetailBody">
+        <div class="text-muted">로딩 중...</div>
+      </div>
+      <div class="modal-footer border-secondary">
+        <button type="button" class="btn btn-outline-light" data-bs-dismiss="modal">닫기</button>
+      </div>
     </div>
   </div>
 </div>
@@ -128,6 +193,9 @@
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 <script>
   let chart;
+  let cumChart;
+  let diaryRowsAll = [];
+  let diaryDetailMap = {};
 
   function updateCurrencyLabels(){
     try{
@@ -183,6 +251,8 @@
     const pref = (window.CurrencyPref && window.CurrencyPref.getMode) ? window.CurrencyPref.getMode() : 'USD';
     const isKrw = (pref === 'KRW');
     const sym = isKrw ? '₩' : '$';
+    const colors = values.map(v => v >= 0 ? 'rgba(220, 53, 69, 0.75)' : 'rgba(13, 110, 253, 0.75)');
+    const borderColors = values.map(v => v >= 0 ? 'rgba(220, 53, 69, 1)' : 'rgba(13, 110, 253, 1)');
     chart = new Chart(ctx, {
       type: 'bar',
       data: {
@@ -190,6 +260,8 @@
         datasets: [{
           label: `일별 실현손익 (${sym})`,
           data: values,
+          backgroundColor: colors,
+          borderColor: borderColors,
           borderWidth: 1
         }]
       },
@@ -202,13 +274,218 @@
     });
   }
 
+  function renderCumChart(labels, values){
+    const ctx = document.getElementById('diaryCumChart');
+    if(cumChart) cumChart.destroy();
+
+    const pref = (window.CurrencyPref && window.CurrencyPref.getMode) ? window.CurrencyPref.getMode() : 'USD';
+    const isKrw = (pref === 'KRW');
+    const sym = isKrw ? '₩' : '$';
+    cumChart = new Chart(ctx, {
+      type: 'line',
+      data: {
+        labels,
+        datasets: [{
+          label: `누적 손익 (${sym})`,
+          data: values,
+          borderColor: 'rgba(13, 202, 240, 0.95)',
+          backgroundColor: 'rgba(13, 202, 240, 0.15)',
+          borderWidth: 2,
+          pointRadius: 2,
+          pointHoverRadius: 4,
+          tension: 0.25,
+          fill: true
+        }]
+      },
+      options: {
+        responsive: true,
+        scales: {
+          y: { beginAtZero: false }
+        }
+      }
+    });
+  }
+
+  function profitClass(v){
+    const x = parseFloat((''+(v ?? '')).replace(/,/g,''));
+    if(isNaN(x) || x === 0) return 'text-muted';
+    return x > 0 ? 'text-up' : 'text-down';
+  }
+
+  function applyDiaryFilter(){
+    const filter = document.getElementById('diary-profit-filter')?.value || '';
+    let rows = (diaryRowsAll || []).slice();
+    if(filter === 'profit'){
+      rows = rows.filter(r => parseFloat((''+(r.profit ?? 0)).replace(/,/g,'')) > 0);
+    }else if(filter === 'loss'){
+      rows = rows.filter(r => parseFloat((''+(r.profit ?? 0)).replace(/,/g,'')) < 0);
+    }else if(filter === 'zero'){
+      rows = rows.filter(r => parseFloat((''+(r.profit ?? 0)).replace(/,/g,'')) === 0);
+    }
+    renderDiaryRows(rows);
+  }
+
+  function setDetailRows(detailRows){
+    diaryDetailMap = {};
+    if(!detailRows || !Array.isArray(detailRows)) return;
+    for(const r of detailRows){
+      const d = r?.date;
+      if(!d) continue;
+      if(!diaryDetailMap[d]) diaryDetailMap[d] = [];
+      diaryDetailMap[d].push(r);
+    }
+  }
+
+  function renderDiaryRows(rows){
+    const tbody = document.getElementById('diary-tbody');
+    const money = (v, digits=2)=>{
+      try{
+        if(window.CurrencyPref) return window.CurrencyPref.formatMoney(v, 'USD', {digits});
+      }catch(e){}
+      const x = parseFloat((''+(v ?? '')).replace(/,/g,''));
+      if(isNaN(x)) return '-';
+      return '$' + x.toLocaleString(undefined,{maximumFractionDigits: digits});
+    };
+
+    if(!rows || rows.length === 0){
+      tbody.innerHTML = '<tr><td colspan="7" class="text-center text-muted py-4">내역이 없습니다.</td></tr>';
+      renderChart([], []);
+      renderCumChart([], []);
+      return;
+    }
+
+    tbody.innerHTML = '';
+    const labels = [];
+    const values = [];
+    const cumValues = [];
+    let cum = 0;
+
+    const pref = (window.CurrencyPref && window.CurrencyPref.getMode) ? window.CurrencyPref.getMode() : 'USD';
+    const fx = (window.CurrencyPref && window.CurrencyPref.getFx) ? window.CurrencyPref.getFx() : {rate: 0};
+    const isKrw = (pref === 'KRW');
+    const fxRate = (fx && fx.rate) ? fx.rate : 0;
+
+    for(const r of rows){
+      labels.push(r.date);
+      const pUsd = parseFloat((''+(r.profit ?? 0)).replace(/,/g,'')) || 0;
+      const pDisp = (isKrw && fxRate > 0) ? (pUsd * fxRate) : pUsd;
+      values.push(pDisp);
+      cum += pDisp;
+      cumValues.push(cum);
+
+      const tr = document.createElement('tr');
+      const hasDetail = Array.isArray(diaryDetailMap[r.date]) && diaryDetailMap[r.date].length > 0;
+      tr.innerHTML = `
+        <td>${r.date}</td>
+        <td class="text-end">${fmt(r.sell_qty)}</td>
+        <td class="text-end">${money(r.buy_amt, 2)}</td>
+        <td class="text-end">${money(r.sell_amt, 2)}</td>
+        <td class="text-end ${profitClass(r.profit)}">${money(r.profit, 2)}</td>
+        <td class="text-end ${profitClass(r.rate)}">${fmt(r.rate)}%</td>
+        <td class="text-end">
+          <button class="btn btn-sm btn-outline-light" ${hasDetail ? '' : 'disabled'} onclick="showDiaryDetail('${r.date}')">
+            <i class="fas fa-info-circle"></i>
+          </button>
+        </td>
+      `;
+      tbody.appendChild(tr);
+    }
+    renderChart(labels, values);
+    renderCumChart(labels, cumValues);
+  }
+
+  function showDiaryDetail(date){
+    const title = document.getElementById('diaryDetailTitle');
+    const body = document.getElementById('diaryDetailBody');
+    if(title) title.textContent = `${date} 매매 상세`;
+    const rows = (diaryDetailMap[date] || []);
+    if(!rows.length){
+      body.innerHTML = '<div class="text-muted">상세 내역이 없습니다.</div>';
+      new bootstrap.Modal(document.getElementById('diaryDetailModal')).show();
+      return;
+    }
+
+    const money = (v, digits=2)=>{
+      try{
+        if(window.CurrencyPref) return window.CurrencyPref.formatMoney(v, 'USD', {digits});
+      }catch(e){}
+      const x = parseFloat((''+(v ?? '')).replace(/,/g,''));
+      if(isNaN(x)) return '-';
+      return '$' + x.toLocaleString(undefined,{maximumFractionDigits: digits});
+    };
+    const num = (v)=> {
+      const x = parseFloat((''+(v ?? '')).replace(/,/g,''));
+      return isNaN(x) ? 0 : x;
+    };
+
+    let totalBuy = 0;
+    let totalSell = 0;
+    let totalProfit = 0;
+
+    let html = `
+      <div class="table-responsive">
+        <table class="table table-dark table-hover align-middle mb-0">
+          <thead>
+            <tr>
+              <th>종목명</th>
+              <th>코드</th>
+              <th>거래소</th>
+              <th>구분</th>
+              <th class="text-end">수량</th>
+              <th class="text-end">매수금액</th>
+              <th class="text-end">매도금액</th>
+              <th class="text-end">손익</th>
+              <th class="text-end">수익률</th>
+            </tr>
+          </thead>
+          <tbody>
+    `;
+
+    for(const r of rows){
+      const buy = num(r.buy_amt);
+      const sell = num(r.sell_amt);
+      const profit = num(r.profit);
+      totalBuy += buy;
+      totalSell += sell;
+      totalProfit += profit;
+      html += `
+        <tr>
+          <td>${r.name || '-'}</td>
+          <td>${r.symbol || '-'}</td>
+          <td>${r.exchange || '-'}</td>
+          <td>${r.side || '-'}</td>
+          <td class="text-end">${fmt(r.qty)}</td>
+          <td class="text-end">${money(buy, 2)}</td>
+          <td class="text-end">${money(sell, 2)}</td>
+          <td class="text-end ${profitClass(profit)}">${money(profit, 2)}</td>
+          <td class="text-end ${profitClass(r.rate)}">${fmt(r.rate)}%</td>
+        </tr>
+      `;
+    }
+
+    html += `
+          <tr class="table-secondary">
+            <td colspan="5" class="text-end fw-bold">합계</td>
+            <td class="text-end fw-bold">${money(totalBuy, 2)}</td>
+            <td class="text-end fw-bold">${money(totalSell, 2)}</td>
+            <td class="text-end fw-bold ${profitClass(totalProfit)}">${money(totalProfit, 2)}</td>
+            <td class="text-end fw-bold">${totalBuy > 0 ? ((totalProfit / totalBuy) * 100).toFixed(2) : 0}%</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+    `;
+    body.innerHTML = html;
+    new bootstrap.Modal(document.getElementById('diaryDetailModal')).show();
+  }
+
   function loadDiary(){
     const from = document.getElementById('diary-from').value;
     const to = document.getElementById('diary-to').value;
     const exchange = document.getElementById('diary-exchange').value;
 
     const tbody = document.getElementById('diary-tbody');
-    tbody.innerHTML = '<tr><td colspan="6" class="text-center text-muted py-4">로딩 중...</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="7" class="text-center text-muted py-4">로딩 중...</td></tr>';
 
     fetch('/api/status').then(r=>r.json()).then(st=>{
       const mode = st.status.mode;
@@ -231,7 +508,7 @@
       return fetch('/api/trading-diary/period-profit?' + params.toString());
     }).then(r=>r.json()).then(resp=>{
       if(!resp.success){
-        tbody.innerHTML = '<tr><td colspan="6" class="text-center text-muted py-4">조회 실패: '+(resp.message||'')+'</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="7" class="text-center text-muted py-4">조회 실패: '+(resp.message||'')+'</td></tr>';
         return;
       }
 
@@ -247,47 +524,31 @@
         if(isNaN(x)) return '-';
         return '$' + x.toLocaleString(undefined,{maximumFractionDigits: digits});
       };
-      document.getElementById('diary-total-profit').textContent = money(resp.summary.total_profit, 2);
-      document.getElementById('diary-total-rate').textContent = (resp.summary.total_rate ?? '-') + '%';
+      const totalProfitEl = document.getElementById('diary-total-profit');
+      const totalRateEl = document.getElementById('diary-total-rate');
+      totalProfitEl.textContent = money(resp.summary.total_profit, 2);
+      totalRateEl.textContent = (resp.summary.total_rate ?? '-') + '%';
+      totalProfitEl.className = `fs-4 fw-bold ${profitClass(resp.summary.total_profit)}`;
+      totalRateEl.className = `fs-4 fw-bold ${profitClass(resp.summary.total_rate)}`;
 
       const rows = resp.rows || [];
-      if(rows.length === 0){
-        tbody.innerHTML = '<tr><td colspan="6" class="text-center text-muted py-4">내역이 없습니다.</td></tr>';
-        renderChart([], []);
-        return;
-      }
-
-      tbody.innerHTML = '';
-      const labels = [];
-      const values = [];
-      const pref = (window.CurrencyPref && window.CurrencyPref.getMode) ? window.CurrencyPref.getMode() : 'USD';
-      const fx = (window.CurrencyPref && window.CurrencyPref.getFx) ? window.CurrencyPref.getFx() : {rate: 0};
-      const isKrw = (pref === 'KRW');
-      const fxRate = (fx && fx.rate) ? fx.rate : 0;
-      for(const r of rows){
-        labels.push(r.date);
-        const pUsd = parseFloat((''+(r.profit ?? 0)).replace(/,/g,'')) || 0;
-        const pDisp = (isKrw && fxRate > 0) ? (pUsd * fxRate) : pUsd;
-        values.push(pDisp);
-        const tr = document.createElement('tr');
-        tr.innerHTML = `
-          <td>${r.date}</td>
-          <td class="text-end">${fmt(r.sell_qty)}</td>
-          <td class="text-end">${money(r.buy_amt, 2)}</td>
-          <td class="text-end">${money(r.sell_amt, 2)}</td>
-          <td class="text-end">${money(r.profit, 2)}</td>
-          <td class="text-end">${fmt(r.rate)}%</td>
-        `;
-        tbody.appendChild(tr);
-      }
-      renderChart(labels, values);
+      diaryRowsAll = rows;
+      setDetailRows(resp.detail_rows || []);
+      applyDiaryFilter();
     }).catch(err=>{
-      tbody.innerHTML = '<tr><td colspan="6" class="text-center text-muted py-4">오류: '+err+'</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="7" class="text-center text-muted py-4">오류: '+err+'</td></tr>';
     });
   }
 
   document.getElementById('btn-diary-search').addEventListener('click', loadDiary);
   document.getElementById('btn-diary-refresh').addEventListener('click', loadDiary);
+  document.getElementById('diary-profit-filter').addEventListener('change', applyDiaryFilter);
+  document.getElementById('diary-chart-tab').addEventListener('shown.bs.tab', function(){
+    try{ if(chart) chart.resize(); }catch(e){}
+  });
+  document.getElementById('diary-cum-tab').addEventListener('shown.bs.tab', function(){
+    try{ if(cumChart) cumChart.resize(); }catch(e){}
+  });
   initDates();
   updateCurrencyLabels();
   loadDiary();

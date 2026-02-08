@@ -1,6 +1,7 @@
 import requests
 import time as time_module
 from datetime import datetime, time, timedelta, timezone
+from pathlib import Path
 from zoneinfo import ZoneInfo
 from src.config.config_manager import config_manager
 from src.api.order import kis_order
@@ -744,6 +745,7 @@ class TradingEngine:
             # 보유 종목 정보 파싱
             my_stocks = {}
             store = PositionStore(mode)
+            history_store = ExecutionHistoryStore(mode=mode)
             held_symbols = []
             for stock in output1:
                 if not stock['ovrs_pdno']: continue
@@ -773,17 +775,57 @@ class TradingEngine:
                 # 보유기간 추적(최초 감지일/추가매수 시점 기록)
                 store.upsert(symbol=symbol, qty=qty, exchange=exch)
 
-            # 잔고에 없는 종목은 store에서도 정리
+            # 잔고에 없는 종목은 store에서도 정리(일시 누락 유예)
             for sym in store.all_symbols():
                 if sym not in my_stocks:
-                    store.upsert(symbol=sym, qty=0)
+                    miss = store.mark_missing(sym)
+                    if miss >= 2:
+                        store.upsert(symbol=sym, qty=0)
 
             # 보유기간 보정: v1_007(주문체결내역) 동기화는 실전만 수행
             # - mock에서는 ExecutionHistoryStore로 보유기간을 계산하므로 불필요 호출을 생략한다.
             # - (과도한 호출 방지: 1일 1회, PositionStore meta에 기록)
+            last_buy_date_map: dict[str, str] = {}
+            def _pick_latest_date(*dates: str | None) -> str | None:
+                candidates = []
+                for d in dates:
+                    if not d:
+                        continue
+                    s = str(d).strip()
+                    if len(s) == 8 and s.isdigit():
+                        candidates.append(s)
+                return max(candidates) if candidates else None
+            cache_path = Path(__file__).resolve().parents[2] / "data" / f"last_buy_cache_{mode}.json"
+            def _read_last_buy_cache() -> dict[str, str]:
+                try:
+                    if not cache_path.exists():
+                        return {}
+                    import json
+                    with open(cache_path, "r", encoding="utf-8") as f:
+                        data = json.load(f) or {}
+                    dates = data.get("dates") if isinstance(data, dict) else None
+                    return dates if isinstance(dates, dict) else {}
+                except Exception:
+                    return {}
+            def _write_last_buy_cache(dates: dict[str, str]) -> None:
+                try:
+                    import json
+                    cache_path.parent.mkdir(parents=True, exist_ok=True)
+                    payload = {
+                        "updated_at": datetime.now().isoformat(timespec="seconds"),
+                        "dates": dates,
+                    }
+                    tmp = cache_path.with_suffix(cache_path.suffix + ".tmp")
+                    with open(tmp, "w", encoding="utf-8") as f:
+                        json.dump(payload, f, ensure_ascii=False, indent=2)
+                    tmp.replace(cache_path)
+                except Exception:
+                    pass
+            cache_dates = _read_last_buy_cache()
             try:
                 if mode != "mock":
                     today = datetime.now().strftime("%Y%m%d")
+                    now_dt = datetime.now()
                     # api_sync_day가 오늘이어도, open_date가 detect(임시값)로 남아있으면 다시 동기화한다.
                     needs_sync = False
                     if held_symbols and (store.get_api_sync_day() != today):
@@ -797,13 +839,34 @@ class TradingEngine:
                             except Exception:
                                 continue
 
+                    retry_at = store.get_api_retry_at()
+                    retry_due = False
+                    if retry_at:
+                        try:
+                            retry_due = now_dt >= datetime.fromisoformat(retry_at)
+                        except Exception:
+                            retry_due = True
+                    if (not needs_sync) and held_symbols and retry_due:
+                        needs_sync = True
+
                     if held_symbols and needs_sync:
-                        end = today
-                        lookback_days = 365
-                        start = (datetime.now() - timedelta(days=lookback_days)).strftime("%Y%m%d")
-                        hist = kis_order.get_order_history(start_date=start, end_date=end, mode=mode, caller="ENGINE") or {}
-                        rows = hist.get("output") or hist.get("output1") or []
-                        rows = rows if isinstance(rows, list) else [rows]
+                        hist = None
+                        rows = []
+                        for lookback_days in (60, 30, 14):
+                            end = today
+                            start = (datetime.now() - timedelta(days=lookback_days)).strftime("%Y%m%d")
+                            hist = kis_order.get_order_history(
+                                start_date=start,
+                                end_date=end,
+                                sll_buy_dvsn="02",
+                                ccld_nccs_dvsn="01",
+                                mode=mode,
+                                caller="ENGINE",
+                            )
+                            if hist is not None:
+                                rows = hist.get("output") or hist.get("output1") or []
+                                rows = rows if isinstance(rows, list) else [rows]
+                                break
 
                         def _as_yyyymmdd(v: str | None) -> str | None:
                             if not v:
@@ -812,16 +875,23 @@ class TradingEngine:
                             return vv if len(vv) == 8 and vv.isdigit() else None
 
                         def _is_buy(row: dict) -> bool:
-                            v = str(
-                                row.get("sll_buy_dvsn")
-                                or row.get("sll_buy_dvsn_cd")
-                                or row.get("sll_buy_dvsn_name")
+                            # 가이드: sll_buy_dvsn_cd = 02 (매수)
+                            cd = str(
+                                row.get("sll_buy_dvsn_cd")
+                                or row.get("SLL_BUY_DVSN_CD")
+                                or row.get("sll_buy_dvsn")
                                 or row.get("SLL_BUY_DVSN")
+                                or ""
+                            ).strip()
+                            if cd in ("02", "2"):
+                                return True
+                            v = str(
+                                row.get("sll_buy_dvsn_name")
+                                or row.get("sll_buy_dvsn_cd_name")
+                                or row.get("sll_buy_dvsn_name")
                                 or ""
                             ).strip().lower()
                             if ("buy" in v) or ("매수" in v):
-                                return True
-                            if v in ("02", "2", "buy"):
                                 return True
                             return False
 
@@ -855,13 +925,14 @@ class TradingEngine:
                                 continue
                             if not _is_buy(r):
                                 continue
+                            # 가이드: ord_dt(주문일자)를 우선 사용
                             d = _as_yyyymmdd(
-                                r.get("trad_day")
-                                or r.get("TRAD_DAY")
+                                r.get("ccld_dt")
+                                or r.get("CCLD_DT")
                                 or r.get("ord_dt")
                                 or r.get("ORD_DT")
-                                or r.get("ccld_dt")
-                                or r.get("CCLD_DT")
+                                or r.get("trad_day")
+                                or r.get("TRAD_DAY")
                             )
                             if not d:
                                 continue
@@ -869,15 +940,69 @@ class TradingEngine:
                             if (cur is None) or (d > cur):
                                 last_buy_date[sym] = d
 
-                        updated_any = False
-                        for sym, d in last_buy_date.items():
-                            store.set_open_date(symbol=sym, open_date=d, source="api")
-                            updated_any = True
-                        # 동기화가 실제로 성공(업데이트 발생)했을 때만 api_sync_day 갱신
-                        if updated_any:
-                            store.set_api_sync_day(today)
+                        if hist is not None:
+                            updated_any = False
+                            for sym, d in last_buy_date.items():
+                                store.set_open_date(symbol=sym, open_date=d, source="api")
+                                updated_any = True
+                            last_buy_date_map = last_buy_date
+                            if last_buy_date:
+                                cache_dates.update(last_buy_date)
+                                _write_last_buy_cache(cache_dates)
+                            # 동기화가 실제로 성공(업데이트 발생)했을 때만 api_sync_day 갱신
+                            if updated_any:
+                                store.set_api_sync_day(today)
+                            store.clear_api_retry()
+                            # 일부 종목 누락 시 개별 조회로 보강 (페이지 제한/정렬 문제 대응)
+                            missing = set(held_symbols) - set(last_buy_date.keys())
+                            if missing:
+                                for sym in sorted(missing):
+                                    fetched = None
+                                    for lookback_days in (60, 30, 14):
+                                        end = today
+                                        start = (datetime.now() - timedelta(days=lookback_days)).strftime("%Y%m%d")
+                                        h2 = kis_order.get_order_history(
+                                            start_date=start,
+                                            end_date=end,
+                                            pdno=sym,
+                                            sll_buy_dvsn="02",
+                                            ccld_nccs_dvsn="01",
+                                            mode=mode,
+                                            caller="ENGINE",
+                                        )
+                                        if h2 is None:
+                                            continue
+                                        r2 = h2.get("output") or h2.get("output1") or []
+                                        r2 = r2 if isinstance(r2, list) else [r2]
+                                        for rr in r2:
+                                            if not isinstance(rr, dict):
+                                                continue
+                                            d2 = _as_yyyymmdd(
+                                                rr.get("ccld_dt")
+                                                or rr.get("CCLD_DT")
+                                                or rr.get("ord_dt")
+                                                or rr.get("ORD_DT")
+                                                or rr.get("trad_day")
+                                                or rr.get("TRAD_DAY")
+                                            )
+                                            if d2 and ((fetched is None) or (d2 > fetched)):
+                                                fetched = d2
+                                        if fetched:
+                                            break
+                                    if fetched:
+                                        store.set_open_date(symbol=sym, open_date=fetched, source="api")
+                                        last_buy_date_map[sym] = fetched
+                                        cache_dates[sym] = fetched
+                                if missing:
+                                    _write_last_buy_cache(cache_dates)
+                        else:
+                            # 실패: 다음 재시도 스케줄
+                            store.set_api_last_error("v1_007_failed")
+                            store.set_api_retry_at((now_dt + timedelta(minutes=20)).isoformat(timespec="seconds"))
             except Exception:
                 pass
+            if (mode != "mock") and (not last_buy_date_map) and cache_dates:
+                last_buy_date_map = cache_dates
 
             # 3. 분석 데이터 수신 (즉시실행/미리보기에서 전달되면 그것을 사용)
             if analysis_data is None:
@@ -1160,7 +1285,17 @@ class TradingEngine:
                         except Exception:
                             open_date = None
                     if not open_date:
-                        open_date = store.get_open_date(symbol)
+                        symu = (symbol or "").strip().upper()
+                        if mode != "mock":
+                            open_date = last_buy_date_map.get(symu)
+                        else:
+                            try:
+                                open_date = history_store.get_last_buy_date(symu)
+                            except Exception:
+                                open_date = None
+                    if (mode != "mock") and (not open_date):
+                        # 실전: v1_007/캐시가 없으면 보유기간 매도 판단을 스킵
+                        continue
                     if open_date and len(open_date) == 8:
                         try:
                             od = datetime.strptime(open_date, "%Y%m%d").date()
@@ -1640,6 +1775,11 @@ class TradingEngine:
                             time_module.sleep(max(0.2, limit_buy_step_wait_sec))
                             unfilled_qty = _find_unfilled_qty_by_odno(odno)
                             if unfilled_qty <= 0:
+                                try:
+                                    # 매수 체결(또는 미체결 목록에서 제거됨) 시점 기준으로 보유일 갱신
+                                    store.set_open_date(symbol=symbol, open_date=datetime.now().strftime("%Y%m%d"), source="buy_exec")
+                                except Exception:
+                                    pass
                                 log.info(f"[Engine] {symbol} 매수 체결(또는 미체결 목록에서 제거됨): odno={odno}")
                                 _trace(
                                     "buy.ladder.filled_or_removed",

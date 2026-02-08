@@ -1162,6 +1162,7 @@ class KisOrder:
         ctx_area_fk200 = (ctx_area_fk200 or "").strip()
 
         # 연속조회 루프
+        tr_cont = ""
         for _ in range(20):
             params = {
                 "CANO": cano,
@@ -1181,6 +1182,10 @@ class KisOrder:
             }
 
             try:
+                if tr_cont:
+                    headers["tr_cont"] = tr_cont
+                elif "tr_cont" in headers:
+                    headers.pop("tr_cont", None)
                 # 초당 제한(EGW00201) 발생 시 짧게 재시도
                 data = None
                 for attempt in range(3):
