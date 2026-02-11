@@ -271,7 +271,7 @@
 {% block scripts %}
 <script>
   function loadStrategy(){
-    return fetch('/api/status').then(r=>r.json()).then(d=>{
+    return fetch('/api/status?light=1').then(r=>r.json()).then(d=>{
       const mode = d.status.mode;
       return fetch('/api/auto-trading/strategy?mode='+mode).then(r=>r.json()).then(s=>{
         if(!s.success) return;
@@ -364,7 +364,7 @@
   }
 
   function loadStatus(){
-    fetch('/api/status').then(r=>r.json()).then(d=>{
+    fetch('/api/status?light=1').then(r=>r.json()).then(d=>{
       const mode = d.status.mode;
       fetch('/api/auto-trading/config?mode='+mode).then(r=>r.json()).then(cfg=>{
         document.getElementById('auto-enabled-badge').textContent = cfg.auto_trading_enabled ? 'ON' : 'OFF';
@@ -572,7 +572,7 @@
   }
 
   function loadHistory(){
-    return fetch('/api/status').then(r=>r.json()).then(st=>{
+    return fetch('/api/status?light=1').then(r=>r.json()).then(st=>{
       const mode = st.status.mode;
       const days = parseInt((document.getElementById('history-days')||{}).value || '7', 10) || 7;
       const metaEl = document.getElementById('history-meta');
@@ -596,10 +596,10 @@
             const status = (r.status || '-');
             const cls = (status === 'success') ? 'text-success' : (status === 'error' ? 'text-danger' : 'text-warning');
             const started = (r.started_at || r.finished_at || '-');
-            const buyN = (r.buy_attempts || []).length;
-            const sellN = (r.sell_attempts || []).length;
-            const skipN = (r.skips || []).length;
-            const errN = (r.errors || []).length;
+            const buyN = Array.isArray(r.buy_attempts) ? r.buy_attempts.length : (r.buy_attempts_count ?? 0);
+            const sellN = Array.isArray(r.sell_attempts) ? r.sell_attempts.length : (r.sell_attempts_count ?? 0);
+            const skipN = Array.isArray(r.skips) ? r.skips.length : (r.skips_count ?? 0);
+            const errN = Array.isArray(r.errors) ? r.errors.length : (r.errors_count ?? 0);
             const rid = r.run_id || '';
 
             const tr = document.createElement('tr');

@@ -147,3 +147,10 @@ def get_usd_krw_rate(
     return FxRateResult(rate=None, source=f"{r1.source if 'r1' in locals() else 'kis_unknown'}+{r2.source}", fetched_at=datetime.now().isoformat(), error=(r2.error or (r1.error if 'r1' in locals() else None)))
 
 
+def get_cached_usd_krw_rate(cache_key: str = "usd_krw") -> Optional[FxRateResult]:
+    """
+    캐시된 USD/KRW 환율만 반환 (네트워크/KIS 호출 없음).
+    - 없으면 None
+    """
+    return _cache_get(cache_key)
+

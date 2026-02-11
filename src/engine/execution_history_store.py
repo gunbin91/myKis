@@ -22,6 +22,9 @@ class ExecutionHistoryStore:
         self._data_dir = project_root / "data"
         self._data_dir.mkdir(parents=True, exist_ok=True)
         self._path = self._data_dir / f"auto_trading_history_{self.mode}.json"
+        self._index_path = self._data_dir / f"auto_trading_history_index_{self.mode}.json"
+        self._detail_dir = self._data_dir / f"auto_trading_history_{self.mode}"
+        self._detail_dir.mkdir(parents=True, exist_ok=True)
 
     def _read_all(self) -> list[dict[str, Any]]:
         try:
@@ -46,9 +49,86 @@ class ExecutionHistoryStore:
             except Exception:
                 pass
 
+    def _read_index(self) -> list[dict[str, Any]]:
+        try:
+            if not self._index_path.exists():
+                return []
+            with open(self._index_path, "r", encoding="utf-8") as f:
+                data = json.load(f) or []
+            return data if isinstance(data, list) else []
+        except Exception:
+            return []
+
+    def _write_index(self, rows: list[dict[str, Any]]) -> None:
+        tmp = self._index_path.with_suffix(self._index_path.suffix + ".tmp")
+        try:
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(rows, f, ensure_ascii=False, indent=2)
+            tmp.replace(self._index_path)
+        except Exception:
+            try:
+                if tmp.exists():
+                    tmp.unlink()
+            except Exception:
+                pass
+
+    def _detail_path(self, run_id: str) -> Path:
+        rid = (run_id or "").strip() or "unknown"
+        return self._detail_dir / f"{rid}.json"
+
+    def _write_detail(self, item: dict[str, Any]) -> None:
+        try:
+            rid = str(item.get("run_id") or "").strip()
+            if not rid:
+                return
+            path = self._detail_path(rid)
+            tmp = path.with_suffix(path.suffix + ".tmp")
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(item, f, ensure_ascii=False, indent=2)
+            tmp.replace(path)
+        except Exception:
+            pass
+
+    def _build_slim(self, item: dict[str, Any]) -> dict[str, Any]:
+        def _cnt(v) -> int:
+            try:
+                if isinstance(v, list):
+                    return len(v)
+                return int(v or 0)
+            except Exception:
+                return 0
+
+        return {
+            "run_id": item.get("run_id"),
+            "mode": item.get("mode"),
+            "run_type": item.get("run_type"),
+            "started_at": item.get("started_at"),
+            "finished_at": item.get("finished_at"),
+            "status": item.get("status"),
+            "message": item.get("message"),
+            "buy_attempts_count": _cnt(item.get("buy_attempts")),
+            "sell_attempts_count": _cnt(item.get("sell_attempts")),
+            "skips_count": _cnt(item.get("skips")),
+            "errors_count": _cnt(item.get("errors")),
+        }
+
     def append(self, item: dict[str, Any]) -> None:
         if not isinstance(item, dict):
             return
+        # 상세 파일 저장 (run_id 기준)
+        self._write_detail(item)
+
+        # 목록 인덱스 저장 (요약)
+        try:
+            index_rows = self._read_index()
+            index_rows.insert(0, self._build_slim(item))
+            if len(index_rows) > int(self.max_entries):
+                index_rows = index_rows[: int(self.max_entries)]
+            self._write_index(index_rows)
+        except Exception:
+            pass
+
+        # 하위 호환: 기존 통합 파일도 유지
         rows = self._read_all()
         rows.insert(0, item)  # 최신이 위
         if len(rows) > int(self.max_entries):
@@ -56,7 +136,17 @@ class ExecutionHistoryStore:
         self._write_all(rows)
 
     def list(self, days: int = 7) -> list[dict[str, Any]]:
-        rows = self._read_all()
+        rows = self._read_index()
+        if not rows:
+            rows = self._read_all()
+            if rows:
+                # 인덱스가 없으면 1회 생성 (키움 방식: 목록 요약만 유지)
+                try:
+                    slim_rows = [self._build_slim(r) for r in rows if isinstance(r, dict)]
+                    self._write_index(slim_rows[: int(self.max_entries)])
+                    rows = slim_rows
+                except Exception:
+                    pass
         if not rows:
             return []
         try:
@@ -82,9 +172,21 @@ class ExecutionHistoryStore:
         rid = (run_id or "").strip()
         if not rid:
             return None
+        try:
+            path = self._detail_path(rid)
+            if path.exists():
+                with open(path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                if isinstance(data, dict):
+                    return data
+        except Exception:
+            pass
+
         for r in self._read_all():
             try:
                 if str(r.get("run_id") or "") == rid:
+                    # 상세 파일이 없으면 생성해서 이후 조회를 빠르게 함
+                    self._write_detail(r)
                     return r
             except Exception:
                 continue

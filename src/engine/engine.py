@@ -1399,20 +1399,24 @@ class TradingEngine:
                 # 매수 대상 수를 top_n으로 제한
                 # 중요: 이미 보유중인 종목이 섞여 있으면, 먼저 제외한 뒤 top_n을 다시 뽑아야
                 # 실제 매수 종목 수가 top_n에 가깝게 나온다.
-                candidates = [x for x in normalized_buy if x.get("code") and x.get("code") not in my_stocks][:top_n]
+                # 키움과 동일하게: 이번 런에서 '매도 성공한 종목'은 재매수 허용
+                candidates = [
+                    x for x in normalized_buy
+                    if x.get("code") and (x.get("code") not in my_stocks or x.get("code") in sold_symbols)
+                ][:top_n]
                 # 제외 사유 기록(사용자 친화 UI용)
                 try:
                     for x in normalized_buy:
                         sym = x.get("code")
                         if not sym:
                             continue
-                        if sym in my_stocks:
+                        if sym in my_stocks and sym not in sold_symbols:
                             history["excluded"]["buy"].append({"symbol": sym, "reason": "already_held"})
                     # top_n 밖으로 밀린 종목
                     kept = set([x.get("code") for x in candidates if x.get("code")])
                     for x in normalized_buy:
                         sym = x.get("code")
-                        if not sym or sym in my_stocks:
+                        if not sym or (sym in my_stocks and sym not in sold_symbols):
                             continue
                         if sym not in kept:
                             history["excluded"]["buy"].append({"symbol": sym, "reason": "beyond_top_n"})
@@ -1522,9 +1526,17 @@ class TradingEngine:
                     symbol = item["code"]
                     exchange = item["exchange"]
 
-                    # 이미 보유중이면 패스(이론상 위에서 걸러지지만 방어적으로 유지)
-                    if symbol in my_stocks:
+                    # 이미 보유중이면 패스(방어 로직).
+                    # 단, 이번 런에서 매도 성공한 종목은 키움 패턴과 동일하게 재매수 허용.
+                    symu = (symbol or "").strip().upper()
+                    if (symu in my_stocks) and (symu not in sold_symbols):
                         log.info(f"[Engine] 이미 보유중인 종목입니다: {symbol}")
+                        history["skips"].append({
+                            "side": "buy",
+                            "symbol": symbol,
+                            "reason": "already_held_guard",
+                            "detail": {"exchange": exchange}
+                        })
                         continue
 
                     # KIS 레이트리밋 방지용 기본 스로틀(키움식 운영 가드)
@@ -1582,27 +1594,25 @@ class TradingEngine:
                         history["skips"].append({"side": "buy", "symbol": symbol, "reason": "budget_insufficient", "detail": {"exchange": exchange, "current_price": current_price, "per_stock_budget": per_stock_budget}})
                         continue
 
-                    # 2) KIS 매수가능금액조회 기준 최대수량
+                    # 2) KIS 매수가능금액조회(v1_014) 기준 최대수량
+                    # - 모의/실전 공통 적용: 모의에서도 주문가능수량을 먼저 반영해 과대주문 실패를 줄인다.
                     max_ps_qty = None
-                    if mode == "mock":
-                        _trace("buy.buyable.skip_mock", symbol=symbol, exchange=exchange, price=float(planned_buy_price))
-                    else:
-                        _set_step("buy.buyable", symbol=symbol, exchange=exchange, price=float(planned_buy_price))
-                        ps = kis_order.get_buyable_amount(exchange=exchange, symbol=symbol, price=planned_buy_price, mode=mode, caller="ENGINE")
-                        if ps is None:
-                            # 정책: v1_014가 최종 실패하면 해당 종목 매수는 스킵 (부분체결/로그-잔고 불일치 방지)
-                            log.warning(f"[Engine] 매수가능금액조회(v1_014) 최종 실패(EGW00201 등). {symbol} 매수 스킵")
-                            history["skips"].append({"side": "buy", "symbol": symbol, "reason": "buyable_query_failed", "detail": {"exchange": exchange, "price": planned_buy_price}})
-                            continue
-                        try:
-                            if ps and ps.get("ovrs_max_ord_psbl_qty"):
-                                max_ps_qty = int(float(ps["ovrs_max_ord_psbl_qty"]))
-                            elif ps and ps.get("max_ord_psbl_qty"):
-                                max_ps_qty = int(float(ps["max_ord_psbl_qty"]))
-                            elif ps and ps.get("ord_psbl_qty"):
-                                max_ps_qty = int(float(ps["ord_psbl_qty"]))
-                        except Exception:
-                            max_ps_qty = None
+                    _set_step("buy.buyable", symbol=symbol, exchange=exchange, price=float(planned_buy_price))
+                    ps = kis_order.get_buyable_amount(exchange=exchange, symbol=symbol, price=planned_buy_price, mode=mode, caller="ENGINE")
+                    if ps is None:
+                        # 정책: v1_014가 최종 실패하면 해당 종목 매수는 스킵 (부분체결/로그-잔고 불일치 방지)
+                        log.warning(f"[Engine] 매수가능금액조회(v1_014) 최종 실패(EGW00201 등). {symbol} 매수 스킵")
+                        history["skips"].append({"side": "buy", "symbol": symbol, "reason": "buyable_query_failed", "detail": {"exchange": exchange, "price": planned_buy_price}})
+                        continue
+                    try:
+                        if ps and ps.get("ovrs_max_ord_psbl_qty"):
+                            max_ps_qty = int(float(ps["ovrs_max_ord_psbl_qty"]))
+                        elif ps and ps.get("max_ord_psbl_qty"):
+                            max_ps_qty = int(float(ps["max_ord_psbl_qty"]))
+                        elif ps and ps.get("ord_psbl_qty"):
+                            max_ps_qty = int(float(ps["ord_psbl_qty"]))
+                    except Exception:
+                        max_ps_qty = None
 
                     qty = qty_by_budget
                     if max_ps_qty is not None:

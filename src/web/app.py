@@ -545,6 +545,7 @@ def settings_page():
 @app.route('/api/status')
 def get_status():
     """현재 상태 및 잔고 조회 (AJAX)"""
+    light = str(request.args.get("light") or "").strip().lower() in ("1", "true", "yes", "y")
     # 멀티프로세스 스케줄러 상태(모드별 하트비트 파일) 기반으로 표시
     def _read_scheduler(mode: str) -> dict:
         try:
@@ -601,6 +602,25 @@ def get_status():
             "real": {**sch_real, "engine_next_run_at": next_run_real, "engine_last_run_day": run_day_real},
         },
     }
+
+    if light:
+        # light 모드: KIS API 호출 없이 상태만 반환 (설정/이력 UI용)
+        cached_rate = None
+        cached_source = None
+        try:
+            from src.utils.fx_rate import get_cached_usd_krw_rate
+            cached = get_cached_usd_krw_rate()
+            cached_rate = cached.rate if cached else None
+            cached_source = cached.source if cached else None
+        except Exception:
+            cached_rate = None
+            cached_source = None
+
+        balance = {
+            "usd_krw_rate": str(cached_rate) if (cached_rate and cached_rate > 0) else "0",
+            "usd_krw_rate_source": cached_source or "cache_unavailable",
+        }
+        return jsonify({"status": status, "balance": balance})
     
     # 잔고 조회 (실시간성을 위해 API 호출)
     # - v1_006(해외주식 잔고): 보유 종목/평가손익(종목별) 위주
