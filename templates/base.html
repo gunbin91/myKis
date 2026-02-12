@@ -440,10 +440,10 @@
             _stopPreviewPolling();
             _previewPollStartedAt = Date.now();
             _previewPollTimer = setInterval(()=>{
-                // 최대 20분 폴링 (실시간 분석이 오래 걸릴 수 있음)
-                if(Date.now() - _previewPollStartedAt > 20 * 60 * 1000){
+                // 최대 30분 폴링 (실시간 분석이 오래 걸릴 수 있음)
+                if(Date.now() - _previewPollStartedAt > 30 * 60 * 1000){
                     _stopPreviewPolling();
-                    document.getElementById('preview-meta').textContent = '미리보기 타임아웃: 분석이 너무 오래 걸립니다. (20분)';
+                    document.getElementById('preview-meta').textContent = '미리보기 타임아웃: 분석이 너무 오래 걸립니다. (30분)';
                     _setExecuteButtonState(false, '타임아웃(다시 시도하세요)');
                     return;
                 }

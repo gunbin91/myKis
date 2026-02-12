@@ -997,7 +997,7 @@ class KisOrder:
                     "CANO": cano,
                     "ACNT_PRDT_CD": acnt_prdt_cd,
                     "OVRS_EXCG_CD": normalize_order_exchange(exchange),
-                    "OVRS_ORD_UNPR": self._format_ovrs_ord_unpr(price),
+                    "OVRS_ORD_UNPR": self._format_order_price(price),  # v1_014는 주문 API와 동일한 포맷 사용
                     "ITEM_CD": symbol,
                 },
             ) or None
@@ -1006,7 +1006,7 @@ class KisOrder:
             "CANO": cano,
             "ACNT_PRDT_CD": acnt_prdt_cd,
             "OVRS_EXCG_CD": normalize_order_exchange(exchange),
-            "OVRS_ORD_UNPR": self._format_ovrs_ord_unpr(price),
+            "OVRS_ORD_UNPR": self._format_order_price(price),  # v1_014는 주문 API와 동일한 포맷 사용 (모의투자 서버 제한)
             "ITEM_CD": item_cd,
         }
 
