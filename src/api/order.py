@@ -230,6 +230,9 @@ class KisOrder:
                     if _retry_on_expired_token(data, mode, attempt, 3):
                         continue
                     if data.get('rt_cd') == '0':
+                        # 성공 로그는 DEBUG 레벨로 (너무 많은 로그 방지)
+                        output1_count = len(data.get('output1', [])) if isinstance(data.get('output1'), list) else 0
+                        log.debug(f"[Order] 잔고 조회 성공: {output1_count}개 종목 [debug: CANO={cano} (len={len(str(cano))}), ACNT_PRDT_CD={acnt_prdt_cd} (len={len(str(acnt_prdt_cd))}), mode={mode}, tr_id={tr_id}]")
                         _log_engine_api_if_needed(caller, mode, {
                             "ts": datetime.now().isoformat(timespec="seconds"),
                             "api": "v1_006",
@@ -244,7 +247,17 @@ class KisOrder:
                     if data.get("msg_cd") == "EGW00201":
                         time.sleep(0.3 * (attempt + 1))
                         continue
-                    log.error(f"[Order] 잔고 조회 실패: {data.get('msg1')} ({data.get('msg_cd')})")
+                    # OPSQ2000(계좌번호 검증 실패) - 모의투자 서버 불안정으로 간헐적 발생 가능, 재시도
+                    if data.get("msg_cd") == "OPSQ2000":
+                        if attempt < 2:  # 최대 2회 재시도 (총 3회 시도)
+                            wait_sec = 0.5 * (attempt + 1)  # 0.5초, 1초 대기
+                            # 재시도 중에는 로그 없음 (최종 실패 시에만 로그)
+                            time.sleep(wait_sec)
+                            continue
+                        # 모든 재시도 실패 시에만 ERROR 로그
+                        log.error(f"[Order] 잔고 조회 실패 (재시도 3회 모두 실패): {data.get('msg1')} ({data.get('msg_cd')}) [debug: CANO={cano} (len={len(str(cano))}), ACNT_PRDT_CD={acnt_prdt_cd} (len={len(str(acnt_prdt_cd))}), mode={mode}, tr_id={tr_id}]")
+                    else:
+                        log.error(f"[Order] 잔고 조회 실패: {data.get('msg1')} ({data.get('msg_cd')})")
                     _log_engine_api_if_needed(caller, mode, {
                         "ts": datetime.now().isoformat(timespec="seconds"),
                         "api": "v1_006",
@@ -354,6 +367,10 @@ class KisOrder:
                     if _retry_on_expired_token(data, mode, attempt, 3):
                         continue
                     if data.get('rt_cd') == '0':
+                        # 성공 로그는 DEBUG 레벨로 (너무 많은 로그 방지)
+                        output3 = data.get('output3', {}) if isinstance(data.get('output3'), dict) else {}
+                        total_asset = output3.get('tot_evlu_amt', 'N/A')
+                        log.debug(f"[Order] 체결기준현재잔고 조회 성공: 총자산={total_asset} [debug: CANO={cano} (len={len(str(cano))}), ACNT_PRDT_CD={acnt_prdt_cd} (len={len(str(acnt_prdt_cd))}), mode={mode}, tr_id={tr_id}]")
                         _log_engine_api_if_needed(caller, mode, {
                             "ts": datetime.now().isoformat(timespec="seconds"),
                             "api": "v1_008",
@@ -368,7 +385,17 @@ class KisOrder:
                     if data.get("msg_cd") == "EGW00201":
                         time.sleep(0.3 * (attempt + 1))
                         continue
-                    log.error(f"[Order] 체결기준현재잔고 조회 실패: {data.get('msg1')} ({data.get('msg_cd')})")
+                    # OPSQ2000(계좌번호 검증 실패) - 모의투자 서버 불안정으로 간헐적 발생 가능, 재시도
+                    if data.get("msg_cd") == "OPSQ2000":
+                        if attempt < 2:  # 최대 2회 재시도 (총 3회 시도)
+                            wait_sec = 0.5 * (attempt + 1)  # 0.5초, 1초 대기
+                            # 재시도 중에는 로그 없음 (최종 실패 시에만 로그)
+                            time.sleep(wait_sec)
+                            continue
+                        # 모든 재시도 실패 시에만 ERROR 로그
+                        log.error(f"[Order] 체결기준현재잔고 조회 실패 (재시도 3회 모두 실패): {data.get('msg1')} ({data.get('msg_cd')}) [debug: CANO={cano} (len={len(str(cano))}), ACNT_PRDT_CD={acnt_prdt_cd} (len={len(str(acnt_prdt_cd))}), mode={mode}, tr_id={tr_id}]")
+                    else:
+                        log.error(f"[Order] 체결기준현재잔고 조회 실패: {data.get('msg1')} ({data.get('msg_cd')})")
                     _log_engine_api_if_needed(caller, mode, {
                         "ts": datetime.now().isoformat(timespec="seconds"),
                         "api": "v1_008",

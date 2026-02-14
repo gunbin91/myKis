@@ -735,11 +735,12 @@ class TradingEngine:
             # 2. 잔고 조회
             balance_info = kis_order.get_balance(mode=mode, caller="ENGINE")
             if not balance_info:
-                log.error("[Engine] 잔고 조회 실패로 중단")
-                self.is_running = False
-                _trace("balance.failed")
-                return
-            _trace("balance.ok")
+                # 잔고 조회 실패 시에도 프로세스 계속 진행 (빈 잔고로 처리)
+                log.warning("[Engine] 잔고 조회 실패, 빈 잔고로 진행 (모의투자 서버 불안정 가능)")
+                balance_info = {"output1": []}  # 빈 잔고로 처리
+                _trace("balance.failed_continue")
+            else:
+                _trace("balance.ok")
 
             output1 = balance_info.get('output1', [])
             # 보유 종목 정보 파싱
@@ -1278,12 +1279,13 @@ class TradingEngine:
 
                 # 보유기간 초과 강제매도
                 if max_hold_days > 0:
+                    # 모의/실전 모두 ExecutionHistoryStore 우선 사용 (일관성)
                     open_date = None
-                    if mode == "mock":
-                        try:
-                            open_date = ExecutionHistoryStore(mode=mode).get_last_buy_date(symbol)
-                        except Exception:
-                            open_date = None
+                    try:
+                        open_date = history_store.get_last_buy_date(symbol)
+                    except Exception:
+                        open_date = None
+                    # ExecutionHistoryStore에 없으면 fallback (실전: v1_007 API 결과, 모의: 재시도)
                     if not open_date:
                         symu = (symbol or "").strip().upper()
                         if mode != "mock":
@@ -1294,7 +1296,7 @@ class TradingEngine:
                             except Exception:
                                 open_date = None
                     if (mode != "mock") and (not open_date):
-                        # 실전: v1_007/캐시가 없으면 보유기간 매도 판단을 스킵
+                        # 실전: ExecutionHistoryStore/v1_007/캐시가 없으면 보유기간 매도 판단을 스킵
                         continue
                     if open_date and len(open_date) == 8:
                         try:

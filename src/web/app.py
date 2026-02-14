@@ -928,13 +928,14 @@ def get_status():
                 sym = (s.get("ovrs_pdno") or "").strip().upper()
                 if not sym:
                     continue
+                # 모의/실전 모두 ExecutionHistoryStore 우선 사용 (일관성)
                 od = None
-                if mode == "mock":
-                    try:
-                        od = history_store.get_last_buy_date(sym)
-                    except Exception:
-                        od = None
-                else:
+                try:
+                    od = history_store.get_last_buy_date(sym)
+                except Exception:
+                    od = None
+                # ExecutionHistoryStore에 없으면 fallback (실전: v1_007 API 결과)
+                if not od and mode != "mock":
                     od = last_buy_date_map.get(sym)
                     if not od:
                         od = None
@@ -1796,14 +1797,17 @@ def _build_trade_preview_view(analysis: dict | None, mode: str) -> dict:
         store = PositionStore(mode=mode)
         history_store = ExecutionHistoryStore(mode=mode)
         for sym in held_map.keys():
+            # 모의/실전 모두 ExecutionHistoryStore 우선 사용 (일관성)
             od = None
-            if mode == "mock":
-                try:
-                    od = history_store.get_last_buy_date(sym)
-                except Exception:
-                    od = None
-            else:
-                od = store.get_open_date(sym)
+            try:
+                od = history_store.get_last_buy_date(sym)
+            except Exception:
+                od = None
+            # ExecutionHistoryStore에 없으면 fallback (실전: v1_007 API 결과 → PositionStore)
+            if not od and mode != "mock":
+                od = last_buy_date_map.get(sym)
+                if not od:
+                    od = store.get_open_date(sym)
             if od and len(od) == 8:
                 try:
                     holding_days_map[sym] = int((datetime.now().date() - datetime.strptime(od, "%Y%m%d").date()).days)

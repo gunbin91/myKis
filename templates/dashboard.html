@@ -152,7 +152,8 @@
         $.get('/api/status', function(data) {
             const status = data.status;
             const balance = data.balance;
-            currentMode = status.mode || 'mock';
+            window.currentMode = status.mode || 'mock';
+            currentMode = window.currentMode;
 
             // 통화/환율 캐시(표시용) - 다른 페이지에서도 재사용
             try{
@@ -305,11 +306,20 @@
 
     // 초기 로드 및 주기적 업데이트
     $(document).ready(function() {
+        window.currentMode = 'mock'; // 초기값 (첫 updateStatus 후 업데이트됨)
         updateCurrencyLabels();
         updateStatus();
         updateLogs();
         
-        setInterval(updateStatus, 5000); // 5초마다 상태 갱신
+        // 모의투자는 1분, 실전은 10초마다 상태 갱신 (모의투자 서버 불안정 대응)
+        let statusPollTimer = null;
+        function startStatusPolling() {
+            if(statusPollTimer) clearTimeout(statusPollTimer);
+            updateStatus();
+            const interval = (window.currentMode === 'mock') ? 60000 : 10000; // 모의: 1분, 실전: 10초
+            statusPollTimer = setTimeout(startStatusPolling, interval);
+        }
+        startStatusPolling();
         setInterval(updateLogs, 2000);   // 2초마다 로그 갱신
     });
 
