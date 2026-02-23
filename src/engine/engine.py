@@ -1342,7 +1342,7 @@ class TradingEngine:
             present_after_sell = None
             if sell_orders_sent > 0:
                 _wait_for_sell_execution(sell_orders, max_wait_time=30)
-                time_module.sleep(2.0)
+                time_module.sleep(5.0)
                 try:
                     present_after_sell = kis_order.get_present_balance(
                         natn_cd="000",
