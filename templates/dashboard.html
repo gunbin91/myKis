@@ -200,9 +200,12 @@
                 }
 
                 // 주문가능금액(USD) 표시 (v1_008 output2 우선, 없으면 외화사용가능금액으로 폴백)
+                // 마이너스 값도 허용 (매입금액이 총자산보다 큰 경우)
                 let fxOrderable = parseFloat(balance.fx_orderable_amt ?? 0);
-                if (isNaN(fxOrderable) || fxOrderable < 0) fxOrderable = 0.0;
-                if (fxOrderable <= 0) {
+                if (isNaN(fxOrderable)) fxOrderable = 0.0;
+                // 마이너스 값은 그대로 표시 (매수 로직에서 0 이하일 때 스킵)
+                if (fxOrderable <= 0 && balance.fx_orderable_source !== 'mock_est_available_krw') {
+                    // mock_est_available_krw가 아닌 경우에만 외화사용가능금액으로 폴백
                     let fxUse = parseFloat(balance.fx_use_psbl_amt ?? 0);
                     if (!isNaN(fxUse) && fxUse > 0) fxOrderable = fxUse;
                 }
@@ -212,10 +215,10 @@
                     $('#fx-orderable-amt').text('$' + fxOrderable.toLocaleString());
                 }
 
-                // 모의 "추정 주문가능금액" 표시 (총자산/환율 추정 폴백인 경우만)
+                // 모의 "추정 주문가능금액" 표시 (총자산-매입금액/환율 추정 폴백인 경우만)
                 try{
                     const src = (balance.fx_orderable_source || '').toString();
-                    const isEst = (currentMode === 'mock' && (src === 'mock_est_cash_krw' || src === 'mock_est_tot_asset'));
+                    const isEst = (currentMode === 'mock' && (src === 'mock_est_available_krw' || src === 'mock_est_cash_krw' || src === 'mock_est_tot_asset'));
                     const estBadge = document.getElementById('dash-fx-orderable-est-badge');
                     const subtitle = document.getElementById('dash-fx-orderable-subtitle');
                     if(estBadge){
@@ -224,7 +227,11 @@
                     if(subtitle){
                         // 통화 토글(USD/KRW) 문구는 updateCurrencyLabels에서 세팅하므로, 여기서는 "추정"일 때만 보강
                         if(isEst){
-                            subtitle.textContent = '모의: 주문가능(USD) 미지원/불안정(035 등) → 현금성(총자산-평가)/환율로 추정 표시';
+                            if(src === 'mock_est_available_krw'){
+                                subtitle.textContent = '모의: 주문가능(USD) 미지원/불안정(035 등) → (총자산-매입금액)/환율로 추정 표시';
+                            }else{
+                                subtitle.textContent = '모의: 주문가능(USD) 미지원/불안정(035 등) → 현금성(총자산-평가)/환율로 추정 표시';
+                            }
                         }else{
                             // 기본값은 updateCurrencyLabels()에서 다시 덮어쓴다.
                         }

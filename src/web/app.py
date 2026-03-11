@@ -998,19 +998,19 @@ def get_status():
 
             # mock 마지막 fallback:
             # - 모의에서 "주문가능(USD)"를 안정적으로 제공하지 않는 케이스가 있어, 0이면 추정으로 보완한다.
-            # - 총자산/환율로 추정하면 "보유평가금액이 있어도 전재산=주문가능"처럼 보여 혼동이 크므로,
-            #   현금성(≈총자산-평가금액)/환율로 더 보수적으로 추정한다.
+            # - 총자산(원화)에서 매입금액합계(원화)를 뺀 금액을 환율로 나눠서 주문가능 예산 계산
             if mode == "mock" and (fx_orderable_amt is None or fx_orderable_amt <= 0):
                 tot_asst_krw = _to_float(out3.get("tot_asst_amt"), default=0.0)
-                evlu_krw = _to_float(out3.get("evlu_amt_smtl") or out3.get("evlu_amt_smtl_amt"), default=0.0)
-                cash_krw = max(0.0, tot_asst_krw - evlu_krw)
-                if usd_krw_rate_effective > 0 and cash_krw > 0:
-                    fx_orderable_amt = cash_krw / usd_krw_rate_effective
-                    fx_orderable_source = "mock_est_cash_krw"
-                elif usd_krw_rate_effective > 0 and tot_asst_krw > 0:
-                    # 최후 폴백(기존 동작): 현금성 추정이 0으로 떨어질 때만 총자산 기반
-                    fx_orderable_amt = tot_asst_krw / usd_krw_rate_effective
-                    fx_orderable_source = "mock_est_tot_asset"
+                # pchs_amt_smtl 또는 pchs_amt_smtl_amt 사용 (v1_008 output3) - 모의투자 서버에서 실제 값 제공
+                pchs_amt_smtl_krw = _to_float(out3.get("pchs_amt_smtl") or out3.get("pchs_amt_smtl_amt"), default=0.0)
+                # 총자산에서 매입금액합계를 뺀 금액이 실제 주문가능 예산 (마이너스도 허용)
+                available_krw = tot_asst_krw - pchs_amt_smtl_krw
+                if usd_krw_rate_effective > 0:
+                    fx_orderable_amt = available_krw / usd_krw_rate_effective
+                    fx_orderable_source = "mock_est_available_krw"
+                else:
+                    fx_orderable_amt = 0.0
+                    fx_orderable_source = "mock_est_available_krw_zero"
     except Exception:
         fx_orderable_amt = _to_float(out3.get("frcr_use_psbl_amt"), default=0.0)
         fx_orderable_source = "008_frcr_use"
@@ -1736,14 +1736,16 @@ def _build_trade_preview_view(analysis: dict | None, mode: str) -> dict:
 
     if mode == "mock" and orderable_usd <= 0:
         tot_asst_krw = _to_float(out3.get("tot_asst_amt"), 0.0)
-        evlu_krw = _to_float(out3.get("evlu_amt_smtl") or out3.get("evlu_amt_smtl_amt"), 0.0)
-        cash_krw = max(0.0, tot_asst_krw - evlu_krw)
-        if usd_krw_rate > 0 and cash_krw > 0:
-            orderable_usd = cash_krw / usd_krw_rate
-            orderable_source = "mock_est_cash_krw"
-        elif usd_krw_rate > 0 and tot_asst_krw > 0:
-            orderable_usd = tot_asst_krw / usd_krw_rate
-            orderable_source = "mock_est_tot_asset"
+        # pchs_amt_smtl 또는 pchs_amt_smtl_amt 사용 (v1_008 output3) - 모의투자 서버에서 실제 값 제공
+        pchs_amt_smtl_krw = _to_float(out3.get("pchs_amt_smtl") or out3.get("pchs_amt_smtl_amt"), 0.0)
+        # 총자산에서 매입금액합계를 뺀 금액이 실제 주문가능 예산 (마이너스도 허용)
+        available_krw = tot_asst_krw - pchs_amt_smtl_krw
+        if usd_krw_rate > 0:
+            orderable_usd = available_krw / usd_krw_rate
+            orderable_source = "mock_est_available_krw"
+        else:
+            orderable_usd = 0.0
+            orderable_source = "mock_est_available_krw_zero"
 
     total_budget_usd = max(0.0, orderable_usd - reserve_cash_usd)
 

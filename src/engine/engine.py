@@ -1473,31 +1473,30 @@ class TradingEngine:
                             orderable_cash = float(str(out3.get("frcr_use_psbl_amt") or 0).replace(",", ""))
                             if orderable_cash > 0:
                                 orderable_source = "008_frcr_use"
-                        # mock 마지막 fallback: 총자산(원화)/환율로 "통합증거금 느낌"의 총가용 USD 추정
+                        # mock 마지막 fallback: 총자산(원화)에서 매입금액합계(원화)를 뺀 금액을 환율로 나눠서 주문가능 예산 계산
                         if mode == "mock" and orderable_cash <= 0:
                             try:
                                 # 이미 산출한 자동 환율(없으면 설정값 fallback)을 사용
                                 usd_krw_rate = float(str(usd_krw_rate or 1350.0).replace(",", ""))
                                 out3 = (ps.get("output3") or {}) if isinstance(ps, dict) else {}
                                 tot_asst_krw = float(str(out3.get("tot_asst_amt") or 0).replace(",", ""))
-                                evlu_krw = float(str(out3.get("evlu_amt_smtl") or out3.get("evlu_amt_smtl_amt") or 0).replace(",", ""))
-                                cash_krw = max(0.0, tot_asst_krw - evlu_krw)
-                                if usd_krw_rate > 0 and cash_krw > 0:
-                                    orderable_cash = cash_krw / usd_krw_rate
-                                    if orderable_cash > 0:
-                                        orderable_source = "mock_est_cash_krw"
-                                elif usd_krw_rate > 0 and tot_asst_krw > 0:
-                                    # 최후 폴백(기존 동작): 현금성 추정이 0일 때만 총자산 기반
-                                    orderable_cash = tot_asst_krw / usd_krw_rate
-                                    if orderable_cash > 0:
-                                        orderable_source = "mock_est_tot_asset"
+                                # pchs_amt_smtl 또는 pchs_amt_smtl_amt 사용 (v1_008 output3) - 모의투자 서버에서 실제 값 제공
+                                pchs_amt_smtl_krw = float(str(out3.get("pchs_amt_smtl") or out3.get("pchs_amt_smtl_amt") or 0).replace(",", ""))
+                                # 총자산에서 매입금액합계를 뺀 금액이 실제 주문가능 예산 (마이너스도 허용)
+                                available_krw = tot_asst_krw - pchs_amt_smtl_krw
+                                if usd_krw_rate > 0:
+                                    orderable_cash = available_krw / usd_krw_rate
+                                    orderable_source = "mock_est_available_krw"
+                                else:
+                                    orderable_cash = 0.0
+                                    orderable_source = "mock_est_available_krw_zero"
                             except Exception:
                                 pass
                 except Exception:
                     orderable_cash = 0.0
                     orderable_source = None
 
-                total_budget = max(0.0, orderable_cash - reserve_cash)
+                total_budget = orderable_cash - reserve_cash  # 마이너스도 허용 (매수 로직에서 0 이하 체크)
                 per_stock_budget = total_budget / len(candidates) if candidates else 0.0
                 try:
                     history["snapshot"].setdefault("budget", {})
@@ -1516,6 +1515,13 @@ class TradingEngine:
                     log.info("[Engine] 매수 대상 종목이 없습니다. (보유종목 제외 후)")
                     history["status"] = "partial" if history["sell_attempts"] else "no_trade"
                     history["message"] = "no_buy_candidates_after_filter"
+                    return
+
+                # 주문가능 총 예산이 0 이하일 경우 매수 전부 스킵
+                if total_budget <= 0:
+                    log.warning(f"[Engine] 주문가능 총 예산 부족으로 매수 스킵: orderable_cash={orderable_cash:.2f}, reserve_cash_usd={reserve_cash:.2f}, total_budget={total_budget:.2f}")
+                    history["status"] = "partial" if history["sell_attempts"] else "no_trade"
+                    history["message"] = "insufficient_total_budget"
                     return
 
                 if per_stock_budget <= 0:
